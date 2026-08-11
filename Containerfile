@@ -1,4 +1,4 @@
-FROM docker.io/vbatts/slackware:15.0
+FROM docker.io/vbatts/slackware:15.0@sha256:93515a709cf6f12ca093f728b3716afad40b9ed92198feb439e939e6859e0df7
 
 ARG SOURCE_REPOSITORY="https://github.com/mintonogueira/slackware15-sbo-builder"
 ARG BUILD_REVISION="desconhecida"
