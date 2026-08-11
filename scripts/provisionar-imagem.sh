@@ -48,15 +48,30 @@ configure_slackpkg()
             /etc/slackpkg/slackpkg.conf
     fi
 
-    retry slackpkg -batch=on -default_answer=y update gpg
+    gpg_key='/tmp/slackware-GPG-KEY'
+    verify_home='/tmp/slackware-gpg-verify'
+    slackpkg_gpg_home='/etc/slackpkg/gpg'
 
-    fingerprint=$(gpg --homedir /etc/slackpkg/gpg \
+    rm -rf "$verify_home"
+    mkdir -p "$verify_home"
+    chmod 0700 "$verify_home"
+    retry wget -q -O "$gpg_key" "${SLACKWARE_MIRROR}GPG-KEY"
+    gpg --homedir "$verify_home" --batch --import "$gpg_key" >/dev/null 2>&1
+
+    fingerprint=$(gpg --homedir "$verify_home" \
         --with-colons --fingerprint 2>/dev/null |
         awk -F: '$1 == "fpr" { print $10; exit }')
     if [ "$fingerprint" != "$SLACKWARE_KEY_FINGERPRINT" ]; then
         log "Impressao digital inesperada da chave Slackware: ${fingerprint:-vazia}"
         exit 1
     fi
+
+    rm -rf "$slackpkg_gpg_home"
+    mkdir -p "$slackpkg_gpg_home"
+    chmod 0700 "$slackpkg_gpg_home"
+    gpg --homedir "$slackpkg_gpg_home" --batch --import "$gpg_key" >/dev/null 2>&1
+    rm -rf "$verify_home"
+    rm -f "$gpg_key"
 
     retry slackpkg -batch=on -default_answer=y update
 }
