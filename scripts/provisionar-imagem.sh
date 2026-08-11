@@ -229,6 +229,30 @@ install_sbopkg()
     sbopkg -r
 }
 
+require_executable()
+{
+    command_name=$1
+    command_path=$2
+
+    if [ ! -x "$command_path" ]; then
+        log "Validacao falhou: ${command_name} nao foi encontrado em ${command_path}."
+        exit 1
+    fi
+    log "Validacao OK: ${command_name} esta em ${command_path}."
+}
+
+require_nonempty_file()
+{
+    file_name=$1
+    file_path=$2
+
+    if [ ! -s "$file_path" ]; then
+        log "Validacao falhou: ${file_name} esta ausente ou vazio em ${file_path}."
+        exit 1
+    fi
+    log "Validacao OK: ${file_name} esta em ${file_path}."
+}
+
 finalize_image()
 {
     log 'Removendo caches de instalacao da camada final.'
@@ -236,10 +260,11 @@ finalize_image()
     mkdir -p /tmp/SBo /work /usr/src/slapt-src /var/lib/slackbuild-builder
     chmod 1777 /tmp
 
-    test -x /usr/sbin/sbopkg
-    test -x /usr/sbin/sqg
-    test -x /usr/sbin/slapt-src
-    test -s /var/lib/slackbuild-builder/SLACKBUILDS.TXT
+    require_executable sbopkg /usr/sbin/sbopkg
+    require_executable sqg /usr/sbin/sqg
+    require_executable slapt-src /usr/bin/slapt-src
+    require_nonempty_file SLACKBUILDS.TXT \
+        /var/lib/slackbuild-builder/SLACKBUILDS.TXT
     printf '%s\n' 'Slackware 15.0 SBo Builder' > /etc/slackbuild-builder-release
 }
 
