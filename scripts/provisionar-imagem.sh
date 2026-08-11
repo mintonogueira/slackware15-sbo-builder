@@ -9,6 +9,7 @@ SLACKWARE_MIRROR='https://download.salixos.org/x86_64/slackware-15.0/'
 SALIX_REPOSITORY='https://download.salixos.org/x86_64/15.0/'
 SALIX_SBO='https://download.salixos.org/sbo/15.0/'
 SLACKWARE_KEY_FINGERPRINT='EC5649DA401E22ABFA6736EF6A4463C040102233'
+CA_BUNDLE='/etc/ssl/certs/ca-certificates.crt'
 SBOPKG_VERSION='0.38.3'
 SBOPKG_SHA256='b8de23f069ee48800e198007ba25df25bfa8f92ff5705e852b1b1cab58523355'
 SBOPKG_URL="https://github.com/sbopkg/sbopkg/releases/download/${SBOPKG_VERSION}/sbopkg-${SBOPKG_VERSION}-noarch-1_wsr.tgz"
@@ -24,15 +25,68 @@ retry()
     while :; do
         if "$@"; then
             return 0
+        else
+            status=$?
         fi
+        log "Tentativa ${attempt}/3 falhou (codigo ${status})."
         if [ "$attempt" -ge 3 ]; then
-            return 1
+            log 'As tres tentativas falharam; interrompendo a criacao da imagem.'
+            return "$status"
         fi
-        log "Tentativa ${attempt} falhou; limpando cache e repetindo."
         rm -rf /var/cache/packages/* 2>/dev/null || :
         attempt=$((attempt + 1))
+        log "Nova tentativa em 5 segundos."
         sleep 5
     done
+}
+
+download()
+{
+    destination=$1
+    url=$2
+
+    log "Baixando ${url}"
+    retry wget \
+        --ca-certificate="$CA_BUNDLE" \
+        --timeout=60 \
+        --tries=1 \
+        --no-verbose \
+        -O "$destination" \
+        "$url"
+}
+
+configure_https()
+{
+    log 'Validando as ferramentas e o certificado HTTPS de inicializacao.'
+    for required_command in wget gpg slackpkg awk sed md5sum sha256sum; do
+        if ! command -v "$required_command" >/dev/null 2>&1; then
+            log "Ferramenta ausente na imagem-base: ${required_command}"
+            exit 1
+        fi
+    done
+
+    if [ ! -s "$CA_BUNDLE" ]; then
+        log "Certificado HTTPS ausente ou vazio: ${CA_BUNDLE}"
+        exit 1
+    fi
+
+    mkdir -p /etc
+    if [ -f /etc/wgetrc ]; then
+        sed -i \
+            -e '/^[[:space:]]*ca_certificate[[:space:]]*=/d' \
+            -e '/^[[:space:]]*check_certificate[[:space:]]*=/d' \
+            /etc/wgetrc
+    else
+        : > /etc/wgetrc
+    fi
+    {
+        printf '\n'
+        printf '%s\n' "ca_certificate = ${CA_BUNDLE}"
+        printf '%s\n' 'check_certificate = on'
+    } >> /etc/wgetrc
+
+    SSL_CERT_FILE=$CA_BUNDLE
+    export SSL_CERT_FILE
 }
 
 configure_slackpkg()
@@ -55,8 +109,8 @@ configure_slackpkg()
     rm -rf "$verify_home"
     mkdir -p "$verify_home"
     chmod 0700 "$verify_home"
-    retry wget -q -O "$gpg_key" "${SLACKWARE_MIRROR}GPG-KEY"
-    gpg --homedir "$verify_home" --batch --import "$gpg_key" >/dev/null 2>&1
+    download "$gpg_key" "${SLACKWARE_MIRROR}GPG-KEY"
+    gpg --homedir "$verify_home" --batch --import "$gpg_key"
 
     fingerprint=$(gpg --homedir "$verify_home" \
         --with-colons --fingerprint 2>/dev/null |
@@ -69,7 +123,7 @@ configure_slackpkg()
     rm -rf "$slackpkg_gpg_home"
     mkdir -p "$slackpkg_gpg_home"
     chmod 0700 "$slackpkg_gpg_home"
-    gpg --homedir "$slackpkg_gpg_home" --batch --import "$gpg_key" >/dev/null 2>&1
+    gpg --homedir "$slackpkg_gpg_home" --batch --import "$gpg_key"
     rm -rf "$verify_home"
     rm -f "$gpg_key"
 
@@ -121,8 +175,9 @@ install_salix_package()
     base_url="${SALIX_REPOSITORY}${relative_path}"
 
     log "Instalando ${package_name} a partir do repositorio Salix."
-    wget -q -O "$package_file" "$base_url"
-    wget -q -O "$checksum_file" "${base_url%/*}/$(basename "$relative_path" | sed 's/\.[^.]*$/.md5/')"
+    download "$package_file" "$base_url"
+    download "$checksum_file" \
+        "${base_url%/*}/$(basename "$relative_path" | sed 's/\.[^.]*$/.md5/')"
 
     expected=$(awk '{ print $1; exit }' "$checksum_file")
     actual=$(md5sum "$package_file" | awk '{ print $1 }')
@@ -138,7 +193,7 @@ install_salix_package()
 install_salix_tools()
 {
     log 'Instalando slapt-get, slapt-src, fakeroot e spkg.'
-    wget -q -O /tmp/salix-PACKAGES.TXT "${SALIX_REPOSITORY}PACKAGES.TXT"
+    download /tmp/salix-PACKAGES.TXT "${SALIX_REPOSITORY}PACKAGES.TXT"
     install_salix_package fakeroot
     install_salix_package spkg
     install_salix_package slapt-get
@@ -152,7 +207,7 @@ SOURCE=${SALIX_SBO}
 EOF
 
     slapt-src --yes --update
-    wget -q -O /var/lib/slackbuild-builder/SLACKBUILDS.TXT \
+    download /var/lib/slackbuild-builder/SLACKBUILDS.TXT \
         "${SALIX_SBO}SLACKBUILDS.TXT"
     rm -f /tmp/salix-PACKAGES.TXT
 }
@@ -160,7 +215,7 @@ EOF
 install_sbopkg()
 {
     log "Instalando sbopkg ${SBOPKG_VERSION} e sqg."
-    wget -q -O /tmp/sbopkg.tgz "$SBOPKG_URL"
+    download /tmp/sbopkg.tgz "$SBOPKG_URL"
     actual=$(sha256sum /tmp/sbopkg.tgz | awk '{ print $1 }')
     if [ "$actual" != "$SBOPKG_SHA256" ]; then
         log 'Checksum SHA-256 invalido para o sbopkg.'
@@ -193,6 +248,7 @@ if [ "$(uname -m)" != 'x86_64' ]; then
     exit 1
 fi
 
+configure_https
 configure_slackpkg
 install_full_slackware
 install_salix_tools
