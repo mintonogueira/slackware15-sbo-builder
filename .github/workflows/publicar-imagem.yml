@@ -1,0 +1,68 @@
+name: Publicar imagem pronta
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - Containerfile
+      - scripts/**
+      - .github/workflows/publicar-imagem.yml
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: slackware15-sbo-builder-image
+  cancel-in-progress: false
+
+jobs:
+  publicar:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Baixar o repositório
+        uses: actions/checkout@v4
+
+      - name: Preparar certificado de inicialização
+        run: |
+          mkdir -p build
+          cp /etc/ssl/certs/ca-certificates.crt build/bootstrap-ca.crt
+
+      - name: Autenticar no GHCR
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io \
+            --username "${{ github.actor }}" --password-stdin
+
+      - name: Construir a imagem completa
+        run: |
+          docker build \
+            --file Containerfile \
+            --build-arg SOURCE_REPOSITORY="https://github.com/${{ github.repository }}" \
+            --build-arg BUILD_REVISION="${{ github.sha }}" \
+            --tag "ghcr.io/${{ github.repository }}:15.0" \
+            --tag "ghcr.io/${{ github.repository }}:latest" \
+            --tag "ghcr.io/${{ github.repository }}:sha-${{ github.sha }}" \
+            .
+
+      - name: Validar a imagem pronta
+        run: |
+          docker run --rm "ghcr.io/${{ github.repository }}:15.0" --self-test
+          mkdir -p build/test-output
+          docker run --rm \
+            --volume "$PWD/build/test-output:/work:rw" \
+            "ghcr.io/${{ github.repository }}:15.0" \
+            --pacote sl --jobs 1
+          find build/test-output/resultados -type f -name instalar.sh \
+            -print -quit | grep -q .
+
+      - name: Publicar no GHCR
+        run: |
+          docker push "ghcr.io/${{ github.repository }}:15.0"
+          docker push "ghcr.io/${{ github.repository }}:latest"
+          docker push "ghcr.io/${{ github.repository }}:sha-${{ github.sha }}"
