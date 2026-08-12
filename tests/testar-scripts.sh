@@ -175,6 +175,7 @@ case "$1 ${2:-}" in
     'info ') exit 0 ;;
     'image exists') exit 0 ;;
     'container exists') exit 0 ;;
+    'inspect --format') printf '%s\n' "$FAKE_DATA_SOURCE"; exit 0 ;;
     'inspect -f') printf '%s\n' true; exit 0 ;;
     'exec slackware15-repositorio')
         count=0
@@ -192,6 +193,7 @@ EOF
 chmod 0755 "$HOST_FAKEBIN/id" "$HOST_FAKEBIN/podman"
 READY_COUNT_FILE="$TEMP_DIR/podman-prontidao-contagem"
 FAKE_PODMAN_READY_COUNT="$READY_COUNT_FILE" \
+FAKE_DATA_SOURCE="$HOST_DATA" \
 PATH="$HOST_FAKEBIN:$PATH" SLACKBUILD_DATA_DIR="$HOST_DATA" \
 SLACKBUILD_STARTUP_TIMEOUT=30 \
     "$PROJECT_DIR/compilar-slackbuilds.sh" --iniciar >/dev/null
@@ -222,10 +224,16 @@ test -x "$HOST_DATA/slackbuilds-personalizados/google-chrome/google-chrome.Slack
 # o volume persistente e a instancia rootless interrompida deve iniciar.
 MIGRATE_FAKEBIN="$TEMP_DIR/migrate-fakebin"
 MIGRATE_DATA="$TEMP_DIR/migrate-dados"
+OLD_DATA="$TEMP_DIR/dados-clone-antigo"
 ROOTFUL_STATE="$TEMP_DIR/rootful-existe"
+ROOTLESS_EXISTS="$TEMP_DIR/rootless-existe"
 ROOTLESS_RUNNING="$TEMP_DIR/rootless-ativo"
-mkdir -p "$MIGRATE_FAKEBIN" "$MIGRATE_DATA/.estado"
+ROOTLESS_MOUNT="$TEMP_DIR/rootless-montagem"
+mkdir -p "$MIGRATE_FAKEBIN" "$MIGRATE_DATA/.estado" "$OLD_DATA"
 : > "$ROOTFUL_STATE"
+: > "$ROOTLESS_EXISTS"
+printf '%s\n' "$OLD_DATA" > "$ROOTLESS_MOUNT"
+printf '%s\n' preservado > "$OLD_DATA/CONTEUDO-PRESERVADO"
 printf '%s\n' host > "$MIGRATE_DATA/.estado/pergunta-vpn-respondida"
 cat > "$MIGRATE_FAKEBIN/id" <<'EOF'
 #!/bin/sh
@@ -235,14 +243,6 @@ case "${1:-}" in
     -un) printf '%s\n' usuario-teste ;;
     *) exit 1 ;;
 esac
-EOF
-cat > "$MIGRATE_FAKEBIN/ss" <<'EOF'
-#!/bin/sh
-printf '%s\n' 'State Recv-Q Send-Q Local Address:Port Peer Address:Port'
-if [ -e "$FAKE_ROOTFUL_STATE" ]; then
-    printf '%s\n' 'LISTEN 0 128 0.0.0.0:8080 0.0.0.0:*'
-    printf '%s\n' 'LISTEN 0 128 [::]:8443 [::]:*'
-fi
 EOF
 cat > "$MIGRATE_FAKEBIN/sudo" <<'EOF'
 #!/bin/sh
@@ -267,7 +267,8 @@ fi
 case "$1 ${2:-}" in
     'info ') exit 0 ;;
     'image exists') exit 0 ;;
-    'container exists') exit 0 ;;
+    'container exists') [ -e "$FAKE_ROOTLESS_EXISTS" ]; exit ;;
+    'inspect --format') sed -n '1p' "$FAKE_ROOTLESS_MOUNT"; exit 0 ;;
     'inspect -f')
         if [ -e "$FAKE_ROOTLESS_RUNNING" ]; then
             printf '%s\n' true
@@ -276,7 +277,22 @@ case "$1 ${2:-}" in
         fi
         exit 0
         ;;
+    'rm --force')
+        rm -f "$FAKE_ROOTLESS_EXISTS" "$FAKE_ROOTLESS_RUNNING" \
+            "$FAKE_ROOTLESS_MOUNT"
+        exit 0
+        ;;
+    'create --name')
+        : > "$FAKE_ROOTLESS_EXISTS"
+        printf '%s\n' "$FAKE_DATA_SOURCE" > "$FAKE_ROOTLESS_MOUNT"
+        exit 0
+        ;;
     'start slackware15-repositorio')
+        if [ -e "$FAKE_ROOTFUL_STATE" ]; then
+            printf '%s\n' \
+                'Listen failed for HOST TCP port */8080: Address already in use' >&2
+            exit 1
+        fi
         : > "$FAKE_ROOTLESS_RUNNING"
         exit 0
         ;;
@@ -284,16 +300,26 @@ case "$1 ${2:-}" in
     *) printf 'podman falso recebeu: %s\n' "$*" >&2; exit 1 ;;
 esac
 EOF
-chmod 0755 "$MIGRATE_FAKEBIN/id" "$MIGRATE_FAKEBIN/ss" \
-    "$MIGRATE_FAKEBIN/sudo" "$MIGRATE_FAKEBIN/podman"
-printf '\n' | \
+chmod 0755 "$MIGRATE_FAKEBIN/id" "$MIGRATE_FAKEBIN/sudo" \
+    "$MIGRATE_FAKEBIN/podman"
+printf '\n\n' | \
 FAKE_ROOTFUL_STATE="$ROOTFUL_STATE" \
+FAKE_ROOTLESS_EXISTS="$ROOTLESS_EXISTS" \
 FAKE_ROOTLESS_RUNNING="$ROOTLESS_RUNNING" \
+FAKE_ROOTLESS_MOUNT="$ROOTLESS_MOUNT" \
+FAKE_DATA_SOURCE="$MIGRATE_DATA" \
 PATH="$MIGRATE_FAKEBIN:$PATH" SLACKBUILD_DATA_DIR="$MIGRATE_DATA" \
 SLACKBUILD_STARTUP_TIMEOUT=30 \
-    "$PROJECT_DIR/compilar-slackbuilds.sh" --iniciar >/dev/null
+    "$PROJECT_DIR/compilar-slackbuilds.sh" --iniciar \
+    >"$TEMP_DIR/migracao.out" 2>&1
 [ ! -e "$ROOTFUL_STATE" ]
+[ -e "$ROOTLESS_EXISTS" ]
 [ -e "$ROOTLESS_RUNNING" ]
+[ "$(sed -n '1p' "$ROOTLESS_MOUNT")" = "$MIGRATE_DATA" ]
+[ "$(sed -n '1p' "$OLD_DATA/CONTEUDO-PRESERVADO")" = preservado ]
+grep -q 'montagem do projeto atual' "$TEMP_DIR/migracao.out"
+grep -q 'Podman confirmou um conflito' "$TEMP_DIR/migracao.out"
+grep -q 'Instancia rootful removida' "$TEMP_DIR/migracao.out"
 test -s "$MIGRATE_DATA/rotinas/SHA256SUMS"
 test -s "$MIGRATE_DATA/slackbuilds-personalizados/SHA256SUMS"
 

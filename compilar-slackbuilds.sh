@@ -174,6 +174,86 @@ ensure_publish_ports_available()
     die "a(s) porta(s) $conflicts continua(m) em uso por outro servico"
 }
 
+canonical_directory()
+{
+    directory=$1
+    if [ -d "$directory" ]; then
+        (CDPATH= cd "$directory" && pwd -P)
+    else
+        printf '%s\n' "$directory"
+    fi
+}
+
+container_work_source()
+{
+    podman inspect --format \
+        '{{range .Mounts}}{{if eq .Destination "/work"}}{{.Source}}{{end}}{{end}}' \
+        "$CONTAINER" 2>/dev/null || :
+}
+
+reconcile_container_data_mount()
+{
+    container_exists || return 0
+    expected_source=$(canonical_directory "$DATA_DIR")
+    mounted_source=$(container_work_source)
+    if [ -n "$mounted_source" ]; then
+        mounted_source=$(canonical_directory "$mounted_source")
+    fi
+    [ "$mounted_source" = "$expected_source" ] && return 0
+
+    log "O conteiner existente aponta para dados em: ${mounted_source:-montagem ausente}."
+    log "O projeto atual usa dados em: $expected_source."
+    if ! confirm_default_yes 'Recriar somente o conteiner com a montagem do projeto atual?'; then
+        die 'o conteiner existente pertence a outro diretorio do projeto'
+    fi
+    podman rm --force "$CONTAINER" >/dev/null ||
+        die 'nao foi possivel remover o conteiner com a montagem antiga'
+    log 'Conteiner antigo removido; os dados de ambos os diretorios foram preservados.'
+}
+
+start_created_container()
+{
+    start_error="$STATE_DIR/podman-start.erro"
+    if podman start "$CONTAINER" > /dev/null 2>"$start_error"; then
+        rm -f "$start_error"
+        return 0
+    fi
+
+    sed -n '1,120p' "$start_error" >&2
+    if grep -Eqi \
+        'address already in use|listen failed|couldn.t listen|requested ports' \
+        "$start_error"; then
+        log 'O Podman confirmou um conflito nas portas publicadas.'
+        if migrate_legacy_rootful_container; then
+            sleep 1
+            if podman start "$CONTAINER" > /dev/null 2>"$start_error"; then
+                rm -f "$start_error"
+                return 0
+            fi
+            sed -n '1,120p' "$start_error" >&2
+        fi
+    fi
+    die "nao foi possivel iniciar o conteiner $CONTAINER"
+}
+
+create_service_container()
+{
+    tls_ips=$(host_ipv4_list | awk 'NF && !seen[$0]++' | paste -sd, -)
+    podman create \
+        --name "$CONTAINER" \
+        --label "$LABEL" \
+        --restart unless-stopped \
+        --pids-limit 8192 \
+        --security-opt no-new-privileges \
+        --publish "${HTTP_PORT}:80" \
+        --publish "${HTTPS_PORT}:443" \
+        --env "SLACKWARE_RSYNC_ROOT=$SLACKWARE_RSYNC_ROOT" \
+        --env "SALIX_RSYNC_BASE=$SALIX_RSYNC_BASE" \
+        --env "REPO_TLS_IPS=$tls_ips" \
+        --volume "$DATA_DIR:/work:rw,Z" \
+        "$IMAGE" >/dev/null
+}
+
 prepare_host()
 {
     if [ "$(id -u)" -eq 0 ]; then
@@ -390,6 +470,7 @@ start_service()
     mkdir -p "$DATA_DIR/repositorios/navegadores/15.0/packages" \
         "$DATA_DIR/repositorios/navegadores/15.0/metadata"
     prepare_routines_directory
+    reconcile_container_data_mount
 
     if container_exists; then
         if container_running; then
@@ -402,25 +483,13 @@ start_service()
         else
             log "Iniciando o conteiner existente $CONTAINER."
             ensure_publish_ports_available
-            podman start "$CONTAINER" >/dev/null
+            start_created_container
         fi
     else
         ensure_publish_ports_available
         log "Criando o servico persistente $CONTAINER."
-        tls_ips=$(host_ipv4_list | awk 'NF && !seen[$0]++' | paste -sd, -)
-        podman run -d \
-            --name "$CONTAINER" \
-            --label "$LABEL" \
-            --restart unless-stopped \
-            --pids-limit 8192 \
-            --security-opt no-new-privileges \
-            --publish "${HTTP_PORT}:80" \
-            --publish "${HTTPS_PORT}:443" \
-            --env "SLACKWARE_RSYNC_ROOT=$SLACKWARE_RSYNC_ROOT" \
-            --env "SALIX_RSYNC_BASE=$SALIX_RSYNC_BASE" \
-            --env "REPO_TLS_IPS=$tls_ips" \
-            --volume "$DATA_DIR:/work:rw,Z" \
-            "$IMAGE" >/dev/null
+        create_service_container
+        start_created_container
     fi
 
     elapsed=0

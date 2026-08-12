@@ -94,6 +94,12 @@ oferece a migração automática, remove somente essa instância antiga, corrige
 propriedade de `dados/` e inicia o serviço rootless. Repositórios, caches,
 rotinas, SlackBuilds, pacotes e relatórios persistentes não são apagados.
 
+O nome do contêiner é compartilhado entre cópias do projeto. Ao executar um
+clone novo, o controlador compara a origem da montagem `/work` com o `dados/`
+do diretório atual. Se o contêiner existente pertencer a outro clone, ele
+oferece a recriação apenas da instância, preserva os dados antigos e monta o
+diretório atual corretamente.
+
 ## Rotinas e SlackBuilds fora da imagem
 
 Na primeira inicialização, o controlador cria dois conjuntos persistentes:
@@ -345,6 +351,8 @@ Portas padrão do hospedeiro:
 Antes de criar ou iniciar o contêiner, o controlador verifica as duas portas.
 Se estiverem ocupadas por outro serviço que não seja a instância antiga do
 projeto, a execução é interrompida com a lista exata das portas conflitantes.
+Se `ss` ou `netstat` não perceberem a ocupação, o erro devolvido pelo próprio
+Podman/pasta também ativa a recuperação automática antes de uma nova tentativa.
 
 Exemplo:
 
