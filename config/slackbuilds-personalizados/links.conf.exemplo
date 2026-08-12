@@ -1,0 +1,5 @@
+# Formato estrito:
+# SHA256|NOME/ARQUIVO|URL_HTTPS
+#
+# Exemplo:
+# 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef|brave-browser/brave-browser.SlackBuild|https://servidor.exemplo/brave-browser.SlackBuild

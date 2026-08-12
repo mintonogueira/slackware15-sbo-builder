@@ -1,36 +1,50 @@
 #!/bin/sh
 
-# Controlador POSIX executado no hospedeiro.
+# Controlador POSIX executado no hospedeiro Linux.
 
 set -eu
 
 SCRIPT_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd)
 DATA_DIR=${SLACKBUILD_DATA_DIR:-"$SCRIPT_DIR/dados"}
 STATE_DIR="$DATA_DIR/.estado"
-CID_FILE="$STATE_DIR/container.cid"
-PID_FILE="$STATE_DIR/controlador.pid"
-MONITOR_PID_FILE="$STATE_DIR/monitor.pid"
 IMAGE=${SLACKBUILD_IMAGE:-'ghcr.io/mintonogueira/slackware15-sbo-builder:15.0'}
-LABEL='io.mintonogueira.slackware15-sbo-builder=runtime'
+CONTAINER=${SLACKBUILD_CONTAINER:-'slackware15-repositorio'}
+HTTP_PORT=${SLACKBUILD_HTTP_PORT:-8080}
+HTTPS_PORT=${SLACKBUILD_HTTPS_PORT:-8443}
+SLACKWARE_RSYNC_ROOT=${SLACKWARE_RSYNC_ROOT:-'rsync://slackware.uk/slackware/slackware64-15.0'}
+SALIX_RSYNC_BASE=${SALIX_RSYNC_BASE:-'rsync://rsync.slackware.uk/salix'}
+LABEL='io.mintonogueira.slackware15-sbo-builder=service'
+ACTION=''
 PACKAGE=''
-ACTION='build'
-RUN_NAME=''
-RUN_PID=''
 MONITOR_PID=''
 
 usage()
 {
     cat <<'EOF'
 Uso:
+  ./compilar-slackbuilds.sh --preparar-hospedeiro
+  ./compilar-slackbuilds.sh --iniciar
+  ./compilar-slackbuilds.sh --sincronizar
+  ./compilar-slackbuilds.sh --sincronizar-slackbuilds
+  ./compilar-slackbuilds.sh --compilar-faltantes
+  ./compilar-slackbuilds.sh --atualizar-navegadores
+  ./compilar-slackbuilds.sh --executar-tudo
   ./compilar-slackbuilds.sh --pacote NOME
-  ./compilar-slackbuilds.sh --parar
+  ./compilar-slackbuilds.sh --configurar-vpn
+  ./compilar-slackbuilds.sh --fontes-slapt-get
   ./compilar-slackbuilds.sh --status
+  ./compilar-slackbuilds.sh --logs-servidor
+  ./compilar-slackbuilds.sh --parar
+  ./compilar-slackbuilds.sh --remover-instancia
   ./compilar-slackbuilds.sh --atualizar-imagem
-  ./compilar-slackbuilds.sh --limpar-falhas
-  ./compilar-slackbuilds.sh --limpar-testes
 
-Resultados concluidos: dados/resultados/
-Tentativas malsucedidas: dados/falhas/
+Variaveis opcionais:
+  SLACKBUILD_DATA_DIR     Diretorio persistente dos repositorios e resultados
+  SLACKBUILD_HTTP_PORT    Porta HTTP no hospedeiro (padrao: 8080)
+  SLACKBUILD_HTTPS_PORT   Porta HTTPS no hospedeiro (padrao: 8443)
+  SLACKBUILD_IMAGE        Imagem publicada no GHCR
+  SLACKWARE_RSYNC_ROOT    Espelho rsync Slackware 15.0 alternativo
+  SALIX_RSYNC_BASE        Espelho rsync Salix alternativo
 EOF
 }
 
@@ -39,148 +53,303 @@ log()
     printf '%s\n' "[controle] $*"
 }
 
+die()
+{
+    printf '%s\n' "ERRO: $*" >&2
+    exit 1
+}
+
+confirm_default_yes()
+{
+    printf '%s' "$1 [S/n] "
+    IFS= read -r answer || answer=''
+    case "$answer" in
+        n|N|nao|NAO|Nao) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+valid_port()
+{
+    case "$1" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    [ "$1" -ge 1024 ] && [ "$1" -le 65535 ]
+}
+
+require_ports()
+{
+    valid_port "$HTTP_PORT" || die "porta HTTP invalida: $HTTP_PORT"
+    valid_port "$HTTPS_PORT" || die "porta HTTPS invalida: $HTTPS_PORT"
+    [ "$HTTP_PORT" -ne "$HTTPS_PORT" ] || die 'as portas HTTP e HTTPS devem ser diferentes'
+}
+
+prepare_host()
+{
+    if [ "$(id -u)" -eq 0 ]; then
+        original_user=${SUDO_USER:-$(logname 2>/dev/null || :)}
+        if [ -z "$original_user" ] || [ "$original_user" = root ]; then
+            printf '%s' 'Usuario comum que executara o Podman: '
+            IFS= read -r original_user
+        fi
+        original_home=$(getent passwd "$original_user" 2>/dev/null | awk -F: '{print $6; exit}')
+        [ -n "$original_home" ] || original_home=${HOME:-/root}
+        "$SCRIPT_DIR/preparar-hospedeiro.sh" "$original_user" "$original_home"
+        return
+    fi
+
+    command -v sudo >/dev/null 2>&1 ||
+        die 'sudo nao esta instalado; execute preparar-hospedeiro.sh como root'
+    sudo "$SCRIPT_DIR/preparar-hospedeiro.sh" "$(id -un)" "$HOME"
+    hash -r
+}
+
 require_podman()
 {
     if ! command -v podman >/dev/null 2>&1; then
-        printf '%s\n' 'ERRO: Podman nao esta instalado ou nao esta no PATH.' >&2
+        log 'Podman nao esta instalado no hospedeiro.'
+        if confirm_default_yes 'Instalar Podman e todas as dependencias agora?'; then
+            prepare_host
+        fi
+        command -v podman >/dev/null 2>&1 || die 'Podman continua indisponivel'
+    fi
+
+    if ! podman info >/dev/null 2>"$STATE_DIR/podman-info.erro"; then
+        printf '%s\n' 'ERRO: o Podman esta instalado, mas nao consegue iniciar.' >&2
+        sed -n '1,120p' "$STATE_DIR/podman-info.erro" >&2
+        printf '%s\n' \
+            'Execute: ./compilar-slackbuilds.sh --preparar-hospedeiro' >&2
         exit 1
     fi
+    rm -f "$STATE_DIR/podman-info.erro"
 }
 
-is_running_pid()
+container_exists()
 {
-    [ -n "${1:-}" ] && kill -0 "$1" 2>/dev/null
+    podman container exists "$CONTAINER" 2>/dev/null
 }
 
-container_id()
+container_running()
 {
-    if [ -s "$CID_FILE" ]; then
-        sed -n '1p' "$CID_FILE"
-    fi
+    [ "$(podman inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null || printf false)" = true ]
 }
 
-stop_execution()
+pull_image()
 {
     require_podman
-    cid=$(container_id)
-    if [ -n "$cid" ] && podman container exists "$cid" 2>/dev/null; then
-        log "Interrompendo o conteiner $cid."
-        podman stop --time 15 "$cid" >/dev/null 2>&1 || :
-        podman rm --force "$cid" >/dev/null 2>&1 || :
-    fi
-
-    if [ -s "$PID_FILE" ]; then
-        controller_pid=$(sed -n '1p' "$PID_FILE")
-        if is_running_pid "$controller_pid" && [ "$controller_pid" -ne "$$" ]; then
-            kill -TERM "$controller_pid" 2>/dev/null || :
-        fi
-    fi
-
-    rm -f "$CID_FILE" "$PID_FILE" "$MONITOR_PID_FILE"
-    log 'Execucao interrompida. Imagem e resultados foram preservados.'
-}
-
-cleanup_runtime()
-{
-    trap - EXIT HUP INT TERM
-    if [ -n "$MONITOR_PID" ]; then
-        kill "$MONITOR_PID" 2>/dev/null || :
-        wait "$MONITOR_PID" 2>/dev/null || :
-    fi
-    cid=$(container_id)
-    if [ -n "$cid" ] && command -v podman >/dev/null 2>&1; then
-        podman rm --force "$cid" >/dev/null 2>&1 || :
-    fi
-    rm -f "$CID_FILE" "$PID_FILE" "$MONITOR_PID_FILE"
-}
-
-interrupt()
-{
-    log 'Interrupcao solicitada; encerrando a instancia temporaria.'
-    cid=$(container_id)
-    if [ -n "$cid" ] && command -v podman >/dev/null 2>&1; then
-        podman stop --time 15 "$cid" >/dev/null 2>&1 || :
-    fi
-    exit 130
-}
-
-confirm()
-{
-    printf '%s' "$1 [s/N] "
-    IFS= read -r answer
-    case "$answer" in
-        s|S|sim|SIM|Sim) return 0 ;;
-        *) return 1 ;;
-    esac
-}
-
-safe_clear_directory()
-{
-    target=$1
-    case "$target" in
-        "$DATA_DIR"/*) ;;
-        *)
-            printf '%s\n' "ERRO: caminho de limpeza recusado: $target" >&2
-            exit 1
+    log "Baixando a imagem pronta: $IMAGE"
+    podman pull "$IMAGE" || die 'nao foi possivel baixar a imagem do GHCR; leia o erro real do Podman acima'
+    image_id=$(podman image inspect --format '{{.Id}}' "$IMAGE" 2>/dev/null || :)
+    case "$image_id" in
+        sha256:*)
+            printf '%s\n' "$image_id" > "$STATE_DIR/imagem-sha256.txt"
+            log "Integridade OCI verificada pelo Podman: $image_id"
             ;;
+        *) die 'o Podman baixou a imagem, mas nao informou seu identificador SHA-256' ;;
     esac
-    [ -d "$target" ] || return 0
-    find "$target" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
 }
 
-clean_failures()
+prepare_routines_directory()
 {
-    target="$DATA_DIR/falhas"
-    if [ ! -d "$target" ] || [ -z "$(find "$target" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
-        log 'Nao existem tentativas malsucedidas para apagar.'
-        return 0
+    routines="$DATA_DIR/rotinas"
+    custom="$DATA_DIR/slackbuilds-personalizados"
+    routines_manifest="$routines/SHA256SUMS"
+    custom_manifest="$custom/SHA256SUMS"
+    mkdir -p "$routines/scripts" "$routines/cache/remotas" "$custom/cache/remotas"
+    if [ ! -e "$routines/LEIA-ME.txt" ]; then
+        cp "$SCRIPT_DIR/config/rotinas/LEIA-ME.txt" "$routines/LEIA-ME.txt"
     fi
-    find "$target" -mindepth 1 -maxdepth 1 -print
-    if confirm 'Apagar somente as tentativas malsucedidas listadas?'; then
-        safe_clear_directory "$target"
-        log 'Tentativas malsucedidas apagadas.'
+    if [ ! -e "$routines/links.conf.exemplo" ]; then
+        cp "$SCRIPT_DIR/config/rotinas/links.conf.exemplo" \
+            "$routines/links.conf.exemplo"
+    fi
+
+    if [ ! -e "$custom/LEIA-ME.txt" ]; then
+        cp "$SCRIPT_DIR/config/slackbuilds-personalizados/LEIA-ME.txt" \
+            "$custom/LEIA-ME.txt"
+    fi
+    if [ ! -e "$custom/links.conf.exemplo" ]; then
+        cp "$SCRIPT_DIR/config/slackbuilds-personalizados/links.conf.exemplo" \
+            "$custom/links.conf.exemplo"
+    fi
+
+    if [ ! -s "$routines_manifest" ]; then
+        if find "$routines/scripts" -type f -print -quit 2>/dev/null | grep -q .; then
+            die 'dados/rotinas possui arquivos, mas SHA256SUMS esta ausente; os arquivos foram preservados'
+        fi
+        command -v sha256sum >/dev/null 2>&1 ||
+            die 'sha256sum e necessario para preparar as rotinas'
+        log 'Copiando todas as rotinas padrao para dados/rotinas; elas permanecerao editaveis.'
+        for routine_script in \
+            entrypoint-servico.sh \
+            gerenciar-repositorios.sh \
+            gerar-indice-repositorio.sh \
+            atualizar-navegadores.sh \
+            verificar-navegadores-diariamente.sh; do
+            cp -p "$SCRIPT_DIR/scripts/$routine_script" "$routines/scripts/$routine_script"
+            chmod 0755 "$routines/scripts/$routine_script"
+        done
+        (
+            cd "$routines"
+            find scripts -type f -print0 |
+                LC_ALL=C sort -z |
+                xargs -0 sha256sum > SHA256SUMS
+        )
+        log "Manifesto criado: $routines_manifest"
     else
-        log 'Limpeza cancelada.'
+        log 'Scripts de rotinas existentes e manifesto foram preservados.'
+    fi
+
+    if [ ! -s "$custom_manifest" ]; then
+        if find "$custom" -mindepth 2 -maxdepth 2 -type f \
+            ! -path "$custom/cache/*" -print -quit 2>/dev/null | grep -q .; then
+            die 'dados/slackbuilds-personalizados possui arquivos, mas SHA256SUMS esta ausente; os arquivos foram preservados'
+        fi
+        log 'Copiando Brave e Google Chrome para dados/slackbuilds-personalizados.'
+        cp -Rp "$SCRIPT_DIR/slackbuilds/." "$custom/"
+        find "$custom" -type f \( -name '*.SlackBuild' -o -name 'doinst.sh' \) \
+            -exec chmod 0755 {} \;
+        (
+            cd "$custom"
+            find . -mindepth 2 -maxdepth 2 -type f ! -path './cache/*' \
+                -printf '%P\0' |
+                LC_ALL=C sort -z |
+                xargs -0 sha256sum > SHA256SUMS
+        )
+        log "Manifesto criado: $custom_manifest"
+    else
+        log 'SlackBuilds personalizados existentes e manifesto foram preservados.'
     fi
 }
 
-clean_tests()
+routines_source_fingerprint()
 {
-    log 'Serao apagados resultados, falhas, parciais e estado deste projeto.'
-    log 'A imagem baixada pelo Podman sera preservada.'
-    if ! confirm 'Continuar com a limpeza completa dos testes?'; then
-        log 'Limpeza cancelada.'
-        return 0
-    fi
-
-    stop_execution >/dev/null 2>&1 || :
-    safe_clear_directory "$DATA_DIR/resultados"
-    safe_clear_directory "$DATA_DIR/falhas"
-    safe_clear_directory "$DATA_DIR/.parciais"
-    safe_clear_directory "$STATE_DIR"
-
-    podman ps -a --filter "label=$LABEL" --format '{{.ID}}' 2>/dev/null |
-    while IFS= read -r stale_id; do
-        [ -n "$stale_id" ] || continue
-        podman rm --force "$stale_id" >/dev/null 2>&1 || :
-    done
-    log 'Resultados de testes e residuos de execucao foram apagados.'
+    routines="$DATA_DIR/rotinas"
+    custom="$DATA_DIR/slackbuilds-personalizados"
+    {
+        printf '%s\n' '[rotinas/scripts]'
+        (cd "$routines" && find scripts -type f -print0 |
+            LC_ALL=C sort -z | xargs -0 sha256sum)
+        printf '%s\n' '[rotinas/controle]'
+        sha256sum "$routines/SHA256SUMS" | awk '{print $1 " SHA256SUMS"}'
+        if [ -f "$routines/links.conf" ]; then
+            sha256sum "$routines/links.conf" | awk '{print $1 " links.conf"}'
+        else
+            printf '%s\n' 'links.conf ausente'
+        fi
+        printf '%s\n' '[slackbuilds-personalizados]'
+        (cd "$custom" && find . -mindepth 2 -maxdepth 2 -type f \
+            ! -path './cache/*' -printf '%P\0' |
+            LC_ALL=C sort -z | xargs -0 sha256sum)
+        printf '%s\n' '[slackbuilds/controle]'
+        sha256sum "$custom/SHA256SUMS" | awk '{print $1 " SHA256SUMS"}'
+        if [ -f "$custom/links.conf" ]; then
+            sha256sum "$custom/links.conf" | awk '{print $1 " links.conf"}'
+        else
+            printf '%s\n' 'links.conf ausente'
+        fi
+    } | sha256sum | awk '{print $1}'
 }
 
-show_status()
+routines_need_reload()
 {
+    applied_file="$STATE_DIR/rotinas-fontes.sha256"
+    [ -s "$applied_file" ] || return 0
+    current=$(routines_source_fingerprint)
+    applied=$(sed -n '1p' "$applied_file")
+    [ "$current" != "$applied" ]
+}
+
+first_vpn_question()
+{
+    marker="$STATE_DIR/pergunta-vpn-respondida"
+    [ -e "$marker" ] && return 0
+
+    cat <<'EOF'
+
+O conteiner possui rede privada do Podman, mas o repositorio e publicado nas
+portas do hospedeiro. Assim, ele pode ser acessado pelo IP da rede local ou
+pelo IP Tailscale do proprio hospedeiro, sem instalar VPN dentro do conteiner.
+EOF
+    if confirm_default_yes 'Usar a VPN do hospedeiro e deixar a configuracao interna para depois?'; then
+        printf '%s\n' 'host' > "$marker"
+        log 'VPN definida no hospedeiro. Esta escolha pode ser revista com --configurar-vpn.'
+    else
+        configure_vpn
+    fi
+}
+
+start_service()
+{
+    require_ports
     require_podman
-    if podman image exists "$IMAGE"; then
-        log "Imagem disponivel localmente: $IMAGE"
-    else
-        log "Imagem ainda nao baixada: $IMAGE"
+
+    if ! podman image exists "$IMAGE"; then
+        pull_image
     fi
 
-    cid=$(container_id)
-    if [ -n "$cid" ] && podman container exists "$cid" 2>/dev/null; then
-        podman ps -a --filter "id=$cid" --format 'Container: {{.ID}}  Estado: {{.Status}}'
+    mkdir -p "$DATA_DIR/repositorios" "$DATA_DIR/resultados" \
+        "$DATA_DIR/falhas" "$DATA_DIR/ignorados" "$DATA_DIR/cache" \
+        "$DATA_DIR/logs" "$STATE_DIR"
+    mkdir -p "$DATA_DIR/repositorios/navegadores/15.0/packages" \
+        "$DATA_DIR/repositorios/navegadores/15.0/metadata"
+    prepare_routines_directory
+
+    if container_exists; then
+        if container_running; then
+            if routines_need_reload; then
+                log 'Alteracao nas rotinas ou SlackBuilds detectada; reiniciando somente o servico.'
+                podman restart "$CONTAINER" >/dev/null
+            else
+                log "Servico ja esta ativo no conteiner $CONTAINER."
+            fi
+        else
+            log "Iniciando o conteiner existente $CONTAINER."
+            podman start "$CONTAINER" >/dev/null
+        fi
     else
-        log 'Nenhuma compilacao ativa.'
+        log "Criando o servico persistente $CONTAINER."
+        tls_ips=$(host_ipv4_list | awk 'NF && !seen[$0]++' | paste -sd, -)
+        podman run -d \
+            --name "$CONTAINER" \
+            --label "$LABEL" \
+            --restart unless-stopped \
+            --pids-limit 8192 \
+            --security-opt no-new-privileges \
+            --publish "${HTTP_PORT}:80" \
+            --publish "${HTTPS_PORT}:443" \
+            --env "SLACKWARE_RSYNC_ROOT=$SLACKWARE_RSYNC_ROOT" \
+            --env "SALIX_RSYNC_BASE=$SALIX_RSYNC_BASE" \
+            --env "REPO_TLS_IPS=$tls_ips" \
+            --volume "$DATA_DIR:/work:rw,Z" \
+            "$IMAGE" >/dev/null
+    fi
+
+    tries=0
+    while [ "$tries" -lt 30 ]; do
+        if podman exec "$CONTAINER" /usr/local/bin/gerenciar-repositorios --servidor-pronto \
+            >/dev/null 2>&1; then
+            show_urls
+            first_vpn_question
+            return 0
+        fi
+        sleep 1
+        tries=$((tries + 1))
+    done
+
+    podman logs --tail 100 "$CONTAINER" >&2 || :
+    die 'o Apache nao ficou pronto dentro do conteiner'
+}
+
+ensure_service()
+{
+    if container_running; then
+        prepare_routines_directory
+        if routines_need_reload; then
+            start_service
+        fi
+    else
+        start_service
     fi
 }
 
@@ -248,7 +417,6 @@ jobs_for_cpu()
 
 resource_monitor()
 {
-    cid=$1
     total_kb=$(awk '/^MemTotal:/ { print $2; exit }' /proc/meminfo)
     critical_kb=$(awk -v total="$total_kb" 'BEGIN {
         value = int(total * 0.05)
@@ -257,147 +425,262 @@ resource_monitor()
     }')
     paused=0
 
-    while podman container exists "$cid" 2>/dev/null; do
+    while container_running; do
         available_kb=$(awk '/^MemAvailable:/ { print $2; exit }' /proc/meminfo)
-        if [ "$available_kb" -lt "$critical_kb" ]; then
-            if [ "$paused" -eq 0 ]; then
-                log 'Pressao critica de memoria; pausando temporariamente a compilacao.'
-                podman pause "$cid" >/dev/null 2>&1 || :
-                paused=1
-            fi
-        elif [ "$paused" -eq 1 ]; then
-            log 'Memoria do hospedeiro recuperada; retomando a compilacao.'
-            podman unpause "$cid" >/dev/null 2>&1 || :
+        if [ "$available_kb" -lt "$critical_kb" ] && [ "$paused" -eq 0 ]; then
+            log 'Pressao critica de memoria; pausando temporariamente o conteiner.'
+            podman pause "$CONTAINER" >/dev/null 2>&1 || :
+            paused=1
+        elif [ "$available_kb" -ge "$critical_kb" ] && [ "$paused" -eq 1 ]; then
+            log 'Memoria recuperada; retomando o conteiner.'
+            podman unpause "$CONTAINER" >/dev/null 2>&1 || :
             paused=0
-        fi
-
-        if [ "$paused" -eq 0 ]; then
-            current_cpu=$(cpu_budget)
-            podman update --cpus "$current_cpu" "$cid" >/dev/null 2>&1 || :
-        else
-            sleep 5
         fi
         sleep 5
     done
 }
 
-pull_image()
+stop_monitor()
 {
-    require_podman
-    log "Baixando a imagem pronta: $IMAGE"
-    if ! podman pull "$IMAGE"; then
-        printf '%s\n' 'ERRO: nao foi possivel baixar a imagem do GHCR.' >&2
-        printf '%s\n' 'Confirme se o pacote do GitHub esta publico.' >&2
-        exit 1
+    if [ -n "$MONITOR_PID" ]; then
+        kill "$MONITOR_PID" 2>/dev/null || :
+        wait "$MONITOR_PID" 2>/dev/null || :
+        MONITOR_PID=''
     fi
 }
 
-run_build()
+run_task()
 {
-    require_podman
+    task=$1
+    shift
+    ensure_service
 
-    if [ -s "$PID_FILE" ]; then
-        previous_pid=$(sed -n '1p' "$PID_FILE")
-        if is_running_pid "$previous_pid"; then
-            printf '%s\n' 'ERRO: ja existe uma compilacao ativa.' >&2
-            exit 1
-        fi
-    fi
-
-    if ! podman image exists "$IMAGE"; then
-        pull_image
-    fi
-
-    memory_mb=$(memory_budget_mb) || {
-        printf '%s\n' 'ERRO: nao ha pelo menos 512 MiB seguros para o conteiner.' >&2
-        exit 1
-    }
+    memory_mb=$(memory_budget_mb) || die 'nao ha pelo menos 512 MiB seguros para executar a tarefa'
     cpus=$(cpu_budget)
     jobs=$(jobs_for_cpu "$cpus")
 
-    mkdir -p "$STATE_DIR" "$DATA_DIR/resultados" "$DATA_DIR/falhas" \
-        "$DATA_DIR/.parciais"
-    printf '%s\n' "$$" > "$PID_FILE"
-    RUN_NAME="slackware15-sbo-${PACKAGE}-$$"
-
-    log "RAM maxima: ${memory_mb} MiB (nunca acima de 25% do total)."
-    log "CPU inicial: ${cpus} nucleo(s) equivalente(s), teto de 25%."
-    log "Jobs de compilacao: $jobs."
-
-    nice -n 10 ionice -c 2 -n 7 podman run \
-        --name "$RUN_NAME" \
-        --label "$LABEL" \
-        --cidfile "$CID_FILE" \
-        --rm \
-        --memory "${memory_mb}m" \
-        --memory-swap "${memory_mb}m" \
-        --cpus "$cpus" \
-        --pids-limit 4096 \
-        --security-opt no-new-privileges \
-        --volume "$DATA_DIR:/work:rw" \
-        "$IMAGE" --pacote "$PACKAGE" --jobs "$jobs" &
-    RUN_PID=$!
-
-    tries=0
-    while [ ! -s "$CID_FILE" ] && is_running_pid "$RUN_PID" && [ "$tries" -lt 100 ]; do
-        sleep 1
-        tries=$((tries + 1))
-    done
-
-    cid=$(container_id)
-    if [ -n "$cid" ]; then
-        resource_monitor "$cid" &
-        MONITOR_PID=$!
-        printf '%s\n' "$MONITOR_PID" > "$MONITOR_PID_FILE"
+    log "Tarefa: $task"
+    log "RAM maxima do servico: ${memory_mb} MiB; CPU: ${cpus}; jobs: ${jobs}."
+    if ! podman update --memory "${memory_mb}m" --memory-swap "${memory_mb}m" \
+        --cpus "$cpus" "$CONTAINER" >/dev/null 2>&1; then
+        log 'O Podman rootless nao aceitou limites dinamicos neste hospedeiro.'
+        log 'A tarefa continuara; o paralelismo interno permanece limitado.'
     fi
 
+    resource_monitor &
+    MONITOR_PID=$!
+    trap stop_monitor EXIT HUP INT TERM
+
+    # A execucao fica anexada ao terminal; stdout e stderr aparecem ao vivo.
     set +e
-    wait "$RUN_PID"
+    podman exec \
+        --env "JOBS=$jobs" \
+        --env "REPO_HTTP_PORT=$HTTP_PORT" \
+        "$CONTAINER" \
+        /usr/local/bin/gerenciar-repositorios "$task" "$@"
     rc=$?
     set -e
-    cleanup_runtime
 
-    if [ "$rc" -ne 0 ]; then
-        log "Compilacao terminou com erro (codigo $rc)."
-        exit "$rc"
-    fi
-    log 'Compilacao concluida.'
+    stop_monitor
+    trap - EXIT HUP INT TERM
+    [ "$rc" -eq 0 ] || exit "$rc"
 }
+
+host_ipv4_list()
+{
+    if command -v ip >/dev/null 2>&1; then
+        ip -o -4 addr show scope global 2>/dev/null |
+            awk '{ sub(/\/.*/, "", $4); print $4 }'
+    elif command -v hostname >/dev/null 2>&1; then
+        hostname -I 2>/dev/null | tr ' ' '\n'
+    fi
+}
+
+show_urls()
+{
+    log 'Repositorio disponivel nestes enderecos do hospedeiro:'
+    found=0
+    host_ipv4_list | while IFS= read -r address; do
+        [ -n "$address" ] || continue
+        found=1
+        printf '  HTTP:  http://%s:%s/\n' "$address" "$HTTP_PORT"
+        printf '  HTTPS: https://%s:%s/\n' "$address" "$HTTPS_PORT"
+    done
+    printf '  Local: http://127.0.0.1:%s/\n' "$HTTP_PORT"
+
+    if command -v tailscale >/dev/null 2>&1; then
+        tail_ip=$(tailscale ip -4 2>/dev/null | sed -n '1p' || :)
+        if [ -n "$tail_ip" ]; then
+            printf '  VPN:   http://%s:%s/\n' "$tail_ip" "$HTTP_PORT"
+        fi
+    fi
+}
+
+configure_vpn()
+{
+    mkdir -p "$STATE_DIR"
+    cat <<'EOF'
+
+Escolha de VPN:
+  1) Usar Tailscale/Headscale configurado no hospedeiro (recomendado)
+  2) Reservar configuracao de Tailscale dentro do conteiner
+  3) Reservar cliente Tailscale ligado a um servidor Headscale
+  4) Decidir depois
+
+Observacao: Headscale e o servidor de controle. Dentro do conteiner, o cliente
+continua sendo o Tailscale, apontado para a URL do seu servidor Headscale.
+EOF
+    printf '%s' 'Opcao [1]: '
+    IFS= read -r answer || answer=''
+    case "$answer" in
+        ''|1) mode='host' ;;
+        2) mode='tailscale-container' ;;
+        3) mode='headscale-container' ;;
+        4) mode='later' ;;
+        *) die 'opcao de VPN invalida' ;;
+    esac
+    printf '%s\n' "$mode" > "$STATE_DIR/pergunta-vpn-respondida"
+    case "$mode" in
+        host)
+            log 'O acesso VPN usara o IP Tailscale do hospedeiro e as portas publicadas.'
+            ;;
+        tailscale-container|headscale-container)
+            log 'Escolha registrada. Credenciais e URL nao serao solicitadas nem gravadas agora.'
+            log 'A configuracao sera feita posteriormente, quando voce executar --configurar-vpn novamente.'
+            ;;
+        later)
+            log 'Configuracao de VPN adiada.'
+            ;;
+    esac
+}
+
+show_status()
+{
+    require_podman
+    if podman image exists "$IMAGE"; then
+        log "Imagem local: $IMAGE"
+    else
+        log "Imagem ainda nao baixada: $IMAGE"
+    fi
+
+    if container_exists; then
+        podman ps -a --filter "name=^${CONTAINER}$" \
+            --format 'Conteiner: {{.Names}}  Estado: {{.Status}}'
+        container_running && show_urls || :
+    else
+        log 'Servico ainda nao foi criado.'
+    fi
+
+    if [ -d "$DATA_DIR/repositorios" ]; then
+        du -sh "$DATA_DIR/repositorios" 2>/dev/null || :
+    fi
+
+    browser_state="$STATE_DIR/navegadores"
+    if [ -d "$browser_state" ]; then
+        for browser in brave-browser google-chrome; do
+            if [ -s "$browser_state/$browser.version" ]; then
+                version=$(sed -n '1p' "$browser_state/$browser.version")
+                log "$browser Stable publicado: $version"
+            fi
+        done
+        if [ -s "$browser_state/status-ultima-tentativa" ]; then
+            status=$(sed -n '1p' "$browser_state/status-ultima-tentativa")
+            log "Ultima verificacao dos navegadores: $status"
+        fi
+    fi
+}
+
+stop_service()
+{
+    require_podman
+    if container_exists; then
+        log "Parando $CONTAINER."
+        podman stop --time 30 "$CONTAINER" >/dev/null
+        log 'Servico parado; imagem e todos os dados foram preservados.'
+    else
+        log 'O servico ainda nao existe.'
+    fi
+}
+
+remove_instance()
+{
+    require_podman
+    if container_exists; then
+        log 'A instancia sera removida; repositorios, resultados e imagem serao preservados.'
+        if confirm_default_yes 'Continuar?'; then
+            podman rm --force "$CONTAINER" >/dev/null
+            log 'Instancia removida.'
+        else
+            log 'Operacao cancelada.'
+        fi
+    fi
+}
+
+update_image()
+{
+    require_podman
+    was_running=0
+    container_running && was_running=1 || :
+    container_exists && podman rm --force "$CONTAINER" >/dev/null || :
+    pull_image
+    if [ "$was_running" -eq 1 ]; then
+        start_service
+    fi
+}
+
+mkdir -p "$STATE_DIR"
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
+        --preparar-hospedeiro) ACTION='prepare-host'; shift ;;
+        --iniciar) ACTION='start'; shift ;;
+        --sincronizar) ACTION='sync'; shift ;;
+        --sincronizar-slackbuilds) ACTION='sync-sbo'; shift ;;
+        --compilar-faltantes) ACTION='build-missing'; shift ;;
+        --atualizar-navegadores) ACTION='update-browsers'; shift ;;
+        --executar-tudo) ACTION='all'; shift ;;
         --pacote)
             [ "$#" -ge 2 ] || { usage >&2; exit 2; }
+            ACTION='package'
             PACKAGE=$2
             shift 2
             ;;
-        --parar) ACTION='stop'; shift ;;
+        --configurar-vpn) ACTION='vpn'; shift ;;
+        --fontes-slapt-get) ACTION='sources'; shift ;;
         --status) ACTION='status'; shift ;;
-        --atualizar-imagem) ACTION='pull'; shift ;;
-        --limpar-falhas) ACTION='clean-failures'; shift ;;
-        --limpar-testes) ACTION='clean-tests'; shift ;;
+        --logs-servidor) ACTION='logs'; shift ;;
+        --parar) ACTION='stop'; shift ;;
+        --remover-instancia) ACTION='remove'; shift ;;
+        --atualizar-imagem) ACTION='update-image'; shift ;;
         -h|--help) usage; exit 0 ;;
         *) usage >&2; exit 2 ;;
     esac
 done
 
-mkdir -p "$STATE_DIR" "$DATA_DIR/resultados" "$DATA_DIR/falhas" "$DATA_DIR/.parciais"
-
 case "$ACTION" in
-    stop) stop_execution ;;
-    status) show_status ;;
-    pull) pull_image ;;
-    clean-failures) clean_failures ;;
-    clean-tests) require_podman; clean_tests ;;
-    build)
+    prepare-host) prepare_host ;;
+    start) start_service ;;
+    sync) run_task --sincronizar ;;
+    sync-sbo) run_task --sincronizar-sbo ;;
+    build-missing) run_task --compilar-faltantes ;;
+    update-browsers) run_task --atualizar-navegadores ;;
+    all) run_task --executar-tudo ;;
+    package)
         case "$PACKAGE" in
-            ''|*[!A-Za-z0-9+_.-]*)
-                printf '%s\n' 'ERRO: informe um nome valido com --pacote.' >&2
-                exit 2
-                ;;
+            ''|*[!A-Za-z0-9+_.-]*) die 'nome de pacote invalido' ;;
         esac
-        trap cleanup_runtime EXIT
-        trap interrupt HUP INT TERM
-        run_build
+        run_task --pacote "$PACKAGE"
         ;;
+    vpn) configure_vpn ;;
+    sources) run_task --fontes-slapt-get ;;
+    status) show_status ;;
+    logs)
+        require_podman
+        container_exists || die 'o servico ainda nao existe'
+        exec podman logs --follow "$CONTAINER"
+        ;;
+    stop) stop_service ;;
+    remove) remove_instance ;;
+    update-image) update_image ;;
+    '') usage; exit 2 ;;
 esac

@@ -7,7 +7,9 @@ on:
       - main
     paths:
       - Containerfile
+      - config/**
       - scripts/**
+      - slackbuilds/**
       - .github/workflows/publicar-imagem.yml
 
 permissions:
@@ -32,6 +34,9 @@ jobs:
           mkdir -p build
           cp /etc/ssl/certs/ca-certificates.crt build/bootstrap-ca.crt
 
+      - name: Validar scripts e índice local
+        run: bash tests/testar-scripts.sh
+
       - name: Autenticar no GHCR
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -53,14 +58,54 @@ jobs:
 
       - name: Validar a imagem pronta
         run: |
-          docker run --rm "ghcr.io/${{ github.repository }}:15.0" --self-test
           mkdir -p build/test-output
+          mkdir -p build/test-output/rotinas/scripts \
+            build/test-output/slackbuilds-personalizados
+          for rotina in \
+            entrypoint-servico.sh \
+            gerenciar-repositorios.sh \
+            gerar-indice-repositorio.sh \
+            atualizar-navegadores.sh \
+            verificar-navegadores-diariamente.sh; do
+            cp -p "scripts/$rotina" build/test-output/rotinas/scripts/
+          done
+          cp -Rp slackbuilds/. build/test-output/slackbuilds-personalizados/
+          (
+            cd build/test-output/rotinas
+            find scripts -type f -print0 \
+              | sort -z \
+              | xargs -0 sha256sum > SHA256SUMS
+          )
+          (
+            cd build/test-output/slackbuilds-personalizados
+            find . -mindepth 2 -maxdepth 2 -type f -printf '%P\0' \
+              | sort -z \
+              | xargs -0 sha256sum > SHA256SUMS
+          )
           docker run --rm \
             --volume "$PWD/build/test-output:/work:rw" \
-            "ghcr.io/${{ github.repository }}:15.0" \
-            --pacote sl --jobs 1
-          find build/test-output/resultados -type f -name instalar.sh \
-            -print -quit | grep -q .
+            "ghcr.io/${{ github.repository }}:15.0" --self-test
+          docker run --rm --entrypoint /bin/sh \
+            "ghcr.io/${{ github.repository }}:15.0" -c '
+              test ! -e /usr/local/bin/gerenciar-repositorios
+              test ! -e /opt/browser-slackbuilds
+              test ! -e /opt/slackrepo/rotinas-padrao
+            '
+          docker run -d \
+            --name slackware-repo-test \
+            --publish 18080:80 \
+            --volume "$PWD/build/test-output:/work:rw" \
+            "ghcr.io/${{ github.repository }}:15.0"
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:18080/ >/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          curl --fail http://127.0.0.1:18080/ >/dev/null
+          docker exec slackware-repo-test \
+            /usr/local/bin/gerenciar-repositorios --self-test
+          docker rm --force slackware-repo-test
 
       - name: Publicar no GHCR
         run: |

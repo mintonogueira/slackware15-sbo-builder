@@ -192,23 +192,14 @@ install_salix_package()
 
 install_salix_tools()
 {
-    log 'Instalando slapt-get, slapt-src, fakeroot e spkg.'
+    log 'Instalando slapt-get, fakeroot, spkg e as ferramentas Salix.'
     download /tmp/salix-PACKAGES.TXT "${SALIX_REPOSITORY}PACKAGES.TXT"
     install_salix_package fakeroot
     install_salix_package spkg
     install_salix_package slapt-get
     install_salix_package slapt-src
 
-    mkdir -p /etc/slapt-get /usr/src/slapt-src /var/lib/slackbuild-builder
-    cat > /etc/slapt-get/slapt-srcrc <<EOF
-BUILDDIR=/usr/src/slapt-src
-PKGEXT=txz
-SOURCE=${SALIX_SBO}
-EOF
-
-    slapt-src --yes --update
-    download /var/lib/slackbuild-builder/SLACKBUILDS.TXT \
-        "${SALIX_SBO}SLACKBUILDS.TXT"
+    mkdir -p /etc/slapt-get /usr/src/slapt-src
     rm -f /tmp/salix-PACKAGES.TXT
 }
 
@@ -225,7 +216,7 @@ install_sbopkg()
     rm -f /tmp/sbopkg.tgz
 
     mkdir -p /var/lib/sbopkg/queues /var/cache/sbopkg /var/log/sbopkg /tmp/SBo
-    log 'Sincronizando a colecao 15.0 usada pelo sbopkg e pelo sqg.'
+    log 'Sincronizando a colecao SBo 15.0 completa usada pelo sbopkg.'
     sbopkg -r
 }
 
@@ -257,15 +248,19 @@ finalize_image()
 {
     log 'Removendo caches de instalacao da camada final.'
     rm -rf /var/cache/packages/* /var/cache/slackpkg/* /tmp/*
-    mkdir -p /tmp/SBo /work /usr/src/slapt-src /var/lib/slackbuild-builder
+    mkdir -p /tmp/SBo /work /usr/src/slapt-src /opt/sbopkg-seed
     chmod 1777 /tmp
+
+    cp -a /var/lib/sbopkg/. /opt/sbopkg-seed/
 
     require_executable sbopkg /usr/sbin/sbopkg
     require_executable sqg /usr/sbin/sqg
     require_executable slapt-src /usr/bin/slapt-src
-    require_nonempty_file SLACKBUILDS.TXT \
-        /var/lib/slackbuild-builder/SLACKBUILDS.TXT
-    printf '%s\n' 'Slackware 15.0 SBo Builder' > /etc/slackbuild-builder-release
+    require_executable httpd /usr/sbin/httpd
+    require_executable rsync /usr/bin/rsync
+    require_executable inicializar-rotinas \
+        /usr/local/sbin/inicializar-rotinas
+    printf '%s\n' 'Slackware 15.0 Repository Builder' > /etc/slackbuild-builder-release
 }
 
 if [ "$(uname -m)" != 'x86_64' ]; then

@@ -1,0 +1,32 @@
+SLACKBUILDS PERSONALIZADOS
+
+Esta pasta e montada como /work/slackbuilds-personalizados. Brave Stable e
+Google Chrome Stable ficam aqui, separados dos scripts de rotinas e da arvore
+SBo sincronizada pelo sbopkg.
+
+Estrutura inicial:
+
+slackbuilds-personalizados/
+|-- SHA256SUMS
+|-- links.conf
+|-- brave-browser/
+|-- google-chrome/
+`-- cache/remotas/
+
+Outro SlackBuild personalizado pode ser incluido em NOME/. Para entrar no
+catalogo geral, inclua pelo menos NOME.info e NOME.SlackBuild. Fontes,
+slack-desc e doinst.sh podem ficar na mesma pasta.
+
+Depois de qualquer edicao, execute a partir desta pasta:
+
+  find . -mindepth 2 -maxdepth 2 -type f ! -path './cache/*' -printf '%P\0' | sort -z | xargs -0 sha256sum > SHA256SUMS
+
+O manifesto precisa corresponder exatamente aos arquivos das pastas de
+pacotes. Qualquer ausencia, adulteracao ou arquivo nao listado interrompe a
+inicializacao.
+
+links.conf aceita substituicoes remotas no formato:
+
+  SHA256|NOME/ARQUIVO|URL_HTTPS
+
+Somente HTTPS e aceito, e a ativacao depende da verificacao SHA-256.

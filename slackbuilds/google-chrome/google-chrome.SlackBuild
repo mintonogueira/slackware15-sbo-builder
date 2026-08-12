@@ -1,0 +1,195 @@
+#!/bin/bash
+
+# SlackBuild independente para a edicao Stable oficial do Google Chrome.
+# Consulta o indice APT do fornecedor antes de baixar e reempacota o .deb
+# x86_64 como pacote Slackware .txz.
+
+set -Eeuo pipefail
+
+PRGNAM=google-chrome
+VENDOR_PACKAGE=google-chrome-stable
+ARCH=${ARCH:-x86_64}
+BUILD=${BUILD:-1}
+TAG=${TAG:-_browser}
+CWD=$(CDPATH= cd "$(dirname "$0")" && pwd)
+TMP=${TMP:-/tmp/browser-slackbuilds}
+PKG="$TMP/package-$PRGNAM"
+OUTPUT=${OUTPUT:-$CWD}
+CACHE_DIR=${CACHE_DIR:-$CWD/cache}
+INDEX_URL=${INDEX_URL:-https://dl.google.com/linux/chrome/deb/dists/stable/main/binary-amd64/Packages}
+REPOSITORY_BASE=${REPOSITORY_BASE:-https://dl.google.com/linux/chrome/deb}
+UPSTREAM_VERSION=${UPSTREAM_VERSION:-}
+SOURCE_URL=${SOURCE_URL:-}
+SOURCE_SHA256=${SOURCE_SHA256:-}
+MAKEPKG=${MAKEPKG:-/sbin/makepkg}
+
+log()
+{
+    printf '%s\n' "[google-chrome.SlackBuild] $*"
+}
+
+die()
+{
+    printf '%s\n' "ERRO: $*" >&2
+    exit 1
+}
+
+download()
+{
+    local destination=$1
+    local url=$2
+    local partial="${destination}.parcial.$$"
+
+    rm -f "$partial"
+    wget --https-only --timeout=90 --tries=3 --no-verbose \
+        -O "$partial" "$url"
+    mv "$partial" "$destination"
+}
+
+read_official_metadata()
+{
+    local index_file
+    local filename
+    index_file=$(mktemp /tmp/google-chrome-packages.XXXXXX)
+    download "$index_file" "$INDEX_URL"
+
+    IFS=$'\t' read -r UPSTREAM_VERSION filename SOURCE_SHA256 < <(
+        awk -v wanted="$VENDOR_PACKAGE" '
+            BEGIN { RS=""; FS="\n" }
+            {
+                package=""; version=""; filename=""; checksum=""
+                for (i=1; i<=NF; i++) {
+                    if ($i ~ /^Package:[[:space:]]*/) {
+                        package=$i; sub(/^Package:[[:space:]]*/, "", package)
+                    } else if ($i ~ /^Version:[[:space:]]*/) {
+                        version=$i; sub(/^Version:[[:space:]]*/, "", version)
+                    } else if ($i ~ /^Filename:[[:space:]]*/) {
+                        filename=$i; sub(/^Filename:[[:space:]]*/, "", filename)
+                    } else if ($i ~ /^SHA256:[[:space:]]*/) {
+                        checksum=$i; sub(/^SHA256:[[:space:]]*/, "", checksum)
+                    }
+                }
+                if (package == wanted) {
+                    printf "%s\t%s\t%s\n", version, filename, checksum
+                    exit
+                }
+            }
+        ' "$index_file"
+    )
+    rm -f "$index_file"
+
+    [ -n "$UPSTREAM_VERSION" ] || die 'versao Stable ausente no indice oficial do Google Chrome'
+    [ -n "$filename" ] || die 'arquivo .deb ausente no indice oficial do Google Chrome'
+    [[ "$SOURCE_SHA256" =~ ^[0-9a-fA-F]{64}$ ]] ||
+        die 'SHA-256 invalido no indice oficial do Google Chrome'
+    SOURCE_URL="${REPOSITORY_BASE%/}/${filename#./}"
+}
+
+normalize_version()
+{
+    printf '%s\n' "$1" |
+        sed -e 's/^[0-9][0-9]*://' -e 's/[-:~]/_/g'
+}
+
+extract_deb_data()
+{
+    local source_file=$1
+    local destination=$2
+    local member
+
+    member=$(ar t "$source_file" | tr -d '\r' |
+        awk '/^data\.tar(\.(xz|gz|zst|bz2))?$/ {print; exit}')
+    [ -n "$member" ] || die "membro data.tar nao encontrado em $source_file"
+
+    case "$member" in
+        data.tar.xz)  ar p "$source_file" "$member" | xz -dc | tar -xpf - -C "$destination" ;;
+        data.tar.gz)  ar p "$source_file" "$member" | gzip -dc | tar -xpf - -C "$destination" ;;
+        data.tar.zst) ar p "$source_file" "$member" | zstd -dc | tar -xpf - -C "$destination" ;;
+        data.tar.bz2) ar p "$source_file" "$member" | bzip2 -dc | tar -xpf - -C "$destination" ;;
+        data.tar)     ar p "$source_file" "$member" | tar -xpf - -C "$destination" ;;
+        *) die "compressao Debian nao suportada: $member" ;;
+    esac
+}
+
+[ "$(id -u)" -eq 0 ] || die 'execute este SlackBuild como root'
+[ "$ARCH" = x86_64 ] || die 'o Google Chrome Stable oficial deste projeto e destinado a x86_64'
+for command_name in wget awk sed sha256sum ar tar; do
+    command -v "$command_name" >/dev/null 2>&1 || die "comando ausente: $command_name"
+done
+[ -x "$MAKEPKG" ] || die "makepkg ausente ou nao executavel: $MAKEPKG"
+
+if [ -z "$UPSTREAM_VERSION" ] || [ -z "$SOURCE_URL" ] || [ -z "$SOURCE_SHA256" ]; then
+    log 'Consultando a versao Stable no repositorio oficial do Google Chrome.'
+    read_official_metadata
+fi
+
+[[ "$UPSTREAM_VERSION" =~ ^[0-9A-Za-z.+:~_-]+$ ]] ||
+    die "versao oficial invalida: $UPSTREAM_VERSION"
+[[ "$SOURCE_URL" == https://* ]] || die 'a origem do Google Chrome deve usar HTTPS'
+[[ "$SOURCE_SHA256" =~ ^[0-9a-fA-F]{64}$ ]] || die 'SHA-256 da origem invalido'
+
+VERSION=${VERSION:-$(normalize_version "$UPSTREAM_VERSION")}
+[[ "$VERSION" =~ ^[0-9A-Za-z.+_]+$ ]] || die "versao Slackware invalida: $VERSION"
+SOURCE_FILE=${SOURCE_FILE:-$CACHE_DIR/${VENDOR_PACKAGE}_${VERSION}_amd64.deb}
+PACKAGE_FILE="$OUTPUT/$PRGNAM-$VERSION-$ARCH-$BUILD$TAG.txz"
+
+mkdir -p "$CACHE_DIR" "$OUTPUT"
+if [ -s "$PACKAGE_FILE" ]; then
+    log "Pacote ja existe; nenhuma conversao necessaria: $PACKAGE_FILE"
+    printf '%s\n' "$PACKAGE_FILE"
+    exit 0
+fi
+
+if [ ! -s "$SOURCE_FILE" ]; then
+    log "Baixando o Google Chrome Stable $UPSTREAM_VERSION."
+    download "$SOURCE_FILE" "$SOURCE_URL"
+else
+    log "Reutilizando o .deb presente no cache: $SOURCE_FILE"
+fi
+
+actual_sha256=$(sha256sum "$SOURCE_FILE" | awk '{print $1}')
+if [ "$actual_sha256" != "${SOURCE_SHA256,,}" ]; then
+    rm -f "$SOURCE_FILE"
+    log 'O .deb em cache estava corrompido; baixando novamente.'
+    download "$SOURCE_FILE" "$SOURCE_URL"
+    actual_sha256=$(sha256sum "$SOURCE_FILE" | awk '{print $1}')
+    if [ "$actual_sha256" != "${SOURCE_SHA256,,}" ]; then
+        rm -f "$SOURCE_FILE"
+        die 'o SHA-256 do .deb do Google Chrome nao corresponde ao indice oficial'
+    fi
+fi
+
+rm -rf "$PKG"
+mkdir -p "$PKG"
+log 'Extraindo o pacote Debian e preparando a arvore Slackware.'
+extract_deb_data "$SOURCE_FILE" "$PKG"
+
+# O .deb tenta cadastrar seu proprio repositorio APT; isso nao pertence ao Slackware.
+rm -rf "$PKG/etc/apt"
+rm -f "$PKG/etc/cron.daily/google-chrome" \
+    "$PKG/etc/cron.daily/google-chrome-stable" \
+    "$PKG/opt/google/chrome/cron/google-chrome"
+
+mkdir -p "$PKG/usr/bin" "$PKG/install"
+if [ ! -e "$PKG/usr/bin/google-chrome-stable" ]; then
+    ln -s /opt/google/chrome/google-chrome \
+        "$PKG/usr/bin/google-chrome-stable"
+fi
+ln -sfn google-chrome-stable "$PKG/usr/bin/google-chrome"
+
+chown -R root:root "$PKG"
+chmod 0755 "$PKG"
+if [ -e "$PKG/opt/google/chrome/chrome-sandbox" ]; then
+    chmod 4755 "$PKG/opt/google/chrome/chrome-sandbox"
+fi
+
+cp "$CWD/slack-desc" "$PKG/install/slack-desc"
+cp "$CWD/doinst.sh" "$PKG/install/doinst.sh"
+
+log "Criando $PACKAGE_FILE"
+(
+    cd "$PKG"
+    "$MAKEPKG" -l y -c n "$PACKAGE_FILE"
+)
+
+printf '%s\n' "$PACKAGE_FILE"

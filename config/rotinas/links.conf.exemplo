@@ -1,0 +1,5 @@
+# Formato estrito:
+# SHA256|CAMINHO_RELATIVO|URL_HTTPS
+#
+# Exemplo:
+# 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef|scripts/gerenciar-repositorios.sh|https://servidor.exemplo/gerenciar-repositorios.sh

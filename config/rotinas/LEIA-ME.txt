@@ -1,0 +1,40 @@
+ROTINAS DO SLACKWARE 15 REPOSITORY BUILDER
+
+Esta pasta e montada no conteiner como /work/rotinas. Todos os scripts
+operacionais padrao ficam aqui; nenhum deles e embutido na imagem.
+
+Estrutura:
+
+rotinas/
+|-- SHA256SUMS
+|-- links.conf
+|-- scripts/
+|   |-- entrypoint-servico.sh
+|   |-- gerenciar-repositorios.sh
+|   |-- gerar-indice-repositorio.sh
+|   |-- atualizar-navegadores.sh
+|   `-- verificar-navegadores-diariamente.sh
+`-- cache/remotas/
+
+Na primeira inicializacao, o controlador copia os scripts padrao para esta
+pasta e cria SHA256SUMS. Depois disso eles permanecem editaveis e nunca sao
+sobrescritos automaticamente.
+
+Depois de qualquer edicao, execute a partir desta pasta:
+
+  find scripts -type f -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
+
+O manifesto precisa corresponder exatamente a todos os arquivos de scripts/.
+Um arquivo ausente, adulterado ou nao listado impede a inicializacao.
+
+links.conf aceita substituicoes remotas no formato:
+
+  SHA256|scripts/ARQUIVO.sh|URL_HTTPS
+
+Somente HTTPS e aceito. Um arquivo remoto so fica ativo depois da verificacao
+SHA-256. Um cache previamente verificado pode ser usado se o servidor estiver
+temporariamente indisponivel.
+
+O conjunto efetivamente ativado fica registrado em:
+
+  /work/.estado/rotinas-ativas.sha256
