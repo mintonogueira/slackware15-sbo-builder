@@ -133,14 +133,28 @@ case "$1 ${2:-}" in
     'image exists') exit 0 ;;
     'container exists') exit 0 ;;
     'inspect -f') printf '%s\n' true; exit 0 ;;
-    'exec slackware15-repositorio') exit 0 ;;
+    'exec slackware15-repositorio')
+        count=0
+        [ ! -s "$FAKE_PODMAN_READY_COUNT" ] ||
+            count=$(sed -n '1p' "$FAKE_PODMAN_READY_COUNT")
+        count=$((count + 1))
+        printf '%s\n' "$count" > "$FAKE_PODMAN_READY_COUNT"
+        [ "$count" -ge 2 ]
+        exit
+        ;;
     'restart slackware15-repositorio') exit 0 ;;
     *) printf 'podman falso recebeu: %s\n' "$*" >&2; exit 1 ;;
 esac
 EOF
 chmod 0755 "$HOST_FAKEBIN/podman"
+READY_COUNT_FILE="$TEMP_DIR/podman-prontidao-contagem"
+FAKE_PODMAN_READY_COUNT="$READY_COUNT_FILE" \
 PATH="$HOST_FAKEBIN:$PATH" SLACKBUILD_DATA_DIR="$HOST_DATA" \
+SLACKBUILD_STARTUP_TIMEOUT=30 \
     "$PROJECT_DIR/compilar-slackbuilds.sh" --iniciar >/dev/null
+[ "$(sed -n '1p' "$READY_COUNT_FILE")" -eq 2 ]
+grep -q 'SLACKBUILD_STARTUP_TIMEOUT:-600' \
+    "$PROJECT_DIR/compilar-slackbuilds.sh"
 test -x "$HOST_DATA/rotinas/scripts/gerenciar-repositorios.sh"
 test -x "$HOST_DATA/slackbuilds-personalizados/brave-browser/brave-browser.SlackBuild"
 test -x "$HOST_DATA/slackbuilds-personalizados/google-chrome/google-chrome.SlackBuild"

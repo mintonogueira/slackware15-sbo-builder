@@ -11,6 +11,7 @@ IMAGE=${SLACKBUILD_IMAGE:-'ghcr.io/mintonogueira/slackware15-sbo-builder:15.0'}
 CONTAINER=${SLACKBUILD_CONTAINER:-'slackware15-repositorio'}
 HTTP_PORT=${SLACKBUILD_HTTP_PORT:-8080}
 HTTPS_PORT=${SLACKBUILD_HTTPS_PORT:-8443}
+STARTUP_TIMEOUT=${SLACKBUILD_STARTUP_TIMEOUT:-600}
 SLACKWARE_RSYNC_ROOT=${SLACKWARE_RSYNC_ROOT:-'rsync://slackware.uk/slackware/slackware64-15.0'}
 SALIX_RSYNC_BASE=${SALIX_RSYNC_BASE:-'rsync://rsync.slackware.uk/salix'}
 LABEL='io.mintonogueira.slackware15-sbo-builder=service'
@@ -42,6 +43,7 @@ Variaveis opcionais:
   SLACKBUILD_DATA_DIR     Diretorio persistente dos repositorios e resultados
   SLACKBUILD_HTTP_PORT    Porta HTTP no hospedeiro (padrao: 8080)
   SLACKBUILD_HTTPS_PORT   Porta HTTPS no hospedeiro (padrao: 8443)
+  SLACKBUILD_STARTUP_TIMEOUT  Espera maxima pela primeira inicializacao (padrao: 600 segundos)
   SLACKBUILD_IMAGE        Imagem publicada no GHCR
   SLACKWARE_RSYNC_ROOT    Espelho rsync Slackware 15.0 alternativo
   SALIX_RSYNC_BASE        Espelho rsync Salix alternativo
@@ -82,6 +84,11 @@ require_ports()
     valid_port "$HTTP_PORT" || die "porta HTTP invalida: $HTTP_PORT"
     valid_port "$HTTPS_PORT" || die "porta HTTPS invalida: $HTTPS_PORT"
     [ "$HTTP_PORT" -ne "$HTTPS_PORT" ] || die 'as portas HTTP e HTTPS devem ser diferentes'
+    case "$STARTUP_TIMEOUT" in
+        ''|*[!0-9]*) die "tempo de inicializacao invalido: $STARTUP_TIMEOUT" ;;
+    esac
+    [ "$STARTUP_TIMEOUT" -ge 30 ] ||
+        die 'o tempo de inicializacao deve ser de pelo menos 30 segundos'
 }
 
 prepare_host()
@@ -331,20 +338,28 @@ start_service()
             "$IMAGE" >/dev/null
     fi
 
-    tries=0
-    while [ "$tries" -lt 30 ]; do
+    elapsed=0
+    log "Aguardando o Apache; a primeira copia da arvore SBo pode demorar alguns minutos."
+    while [ "$elapsed" -lt "$STARTUP_TIMEOUT" ]; do
+        if ! container_running; then
+            podman logs --tail 200 "$CONTAINER" >&2 || :
+            die 'o conteiner encerrou durante a inicializacao'
+        fi
         if podman exec "$CONTAINER" /usr/local/bin/gerenciar-repositorios --servidor-pronto \
             >/dev/null 2>&1; then
             show_urls
             first_vpn_question
             return 0
         fi
-        sleep 1
-        tries=$((tries + 1))
+        sleep 2
+        elapsed=$((elapsed + 2))
+        if [ $((elapsed % 30)) -eq 0 ]; then
+            log "Inicializacao em andamento: ${elapsed}/${STARTUP_TIMEOUT} segundos."
+        fi
     done
 
-    podman logs --tail 100 "$CONTAINER" >&2 || :
-    die 'o Apache nao ficou pronto dentro do conteiner'
+    podman logs --tail 200 "$CONTAINER" >&2 || :
+    die "o Apache nao ficou pronto em $STARTUP_TIMEOUT segundos"
 }
 
 ensure_service()
