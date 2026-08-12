@@ -140,13 +140,19 @@ pull_image()
     log "Baixando a imagem pronta: $IMAGE"
     podman pull "$IMAGE" || die 'nao foi possivel baixar a imagem do GHCR; leia o erro real do Podman acima'
     image_id=$(podman image inspect --format '{{.Id}}' "$IMAGE" 2>/dev/null || :)
-    case "$image_id" in
-        sha256:*)
-            printf '%s\n' "$image_id" > "$STATE_DIR/imagem-sha256.txt"
-            log "Integridade OCI verificada pelo Podman: $image_id"
+    image_hash=${image_id#sha256:}
+    case "$image_hash" in
+        ''|*[!0-9A-Fa-f]*)
+            die 'o Podman baixou a imagem, mas nao informou um identificador SHA-256 valido'
             ;;
-        *) die 'o Podman baixou a imagem, mas nao informou seu identificador SHA-256' ;;
     esac
+    [ "${#image_hash}" -eq 64 ] ||
+        die 'o Podman baixou a imagem, mas nao informou um identificador SHA-256 valido'
+
+    image_hash=$(printf '%s' "$image_hash" | tr 'A-F' 'a-f')
+    image_id="sha256:$image_hash"
+    printf '%s\n' "$image_id" > "$STATE_DIR/imagem-sha256.txt"
+    log "Integridade OCI verificada pelo Podman: $image_id"
 }
 
 prepare_routines_directory()

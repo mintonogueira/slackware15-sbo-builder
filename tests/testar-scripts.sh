@@ -28,6 +28,37 @@ bash -n "$PROJECT_DIR/slackbuilds/google-chrome/google-chrome.SlackBuild"
 sh -n "$PROJECT_DIR/slackbuilds/brave-browser/doinst.sh"
 sh -n "$PROJECT_DIR/slackbuilds/google-chrome/doinst.sh"
 
+# Versoes diferentes do Podman retornam o ID da imagem com ou sem o prefixo
+# "sha256:". O controlador deve aceitar ambos e persistir o formato normalizado.
+PULL_FAKEBIN="$TEMP_DIR/pull-fakebin"
+PULL_DATA="$TEMP_DIR/pull-dados"
+PULL_HASH='63cc3e66abe3e05f4fffeb66a9ed83548a56c3822ac58c1db448bd87633d018f'
+mkdir -p "$PULL_FAKEBIN"
+cat > "$PULL_FAKEBIN/podman" <<'EOF'
+#!/bin/sh
+case "$1 ${2:-}" in
+    'info ') exit 0 ;;
+    'inspect -f') printf '%s\n' false; exit 0 ;;
+    'container exists') exit 1 ;;
+    'pull ghcr.io/mintonogueira/slackware15-sbo-builder:15.0')
+        printf '%s\n' "$PODMAN_FAKE_IMAGE_ID"
+        exit 0
+        ;;
+    'image inspect') printf '%s\n' "$PODMAN_FAKE_IMAGE_ID"; exit 0 ;;
+    *) printf 'podman falso recebeu: %s\n' "$*" >&2; exit 1 ;;
+esac
+EOF
+chmod 0755 "$PULL_FAKEBIN/podman"
+for PULL_ID in "$PULL_HASH" "sha256:$PULL_HASH"; do
+    rm -rf "$PULL_DATA"
+    PATH="$PULL_FAKEBIN:$PATH" \
+    PODMAN_FAKE_IMAGE_ID="$PULL_ID" \
+    SLACKBUILD_DATA_DIR="$PULL_DATA" \
+        "$PROJECT_DIR/compilar-slackbuilds.sh" --atualizar-imagem >/dev/null
+    grep -qx "sha256:$PULL_HASH" \
+        "$PULL_DATA/.estado/imagem-sha256.txt"
+done
+
 ROTINAS_TEST_ROOT="$TEMP_DIR/rotinas"
 CUSTOM_TEST_ROOT="$TEMP_DIR/slackbuilds-personalizados"
 ROTINAS_ACTIVE="$TEMP_DIR/rotinas-ativas"
