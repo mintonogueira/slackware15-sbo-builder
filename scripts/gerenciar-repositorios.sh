@@ -126,12 +126,11 @@ sync_slackware()
     log 'Sincronizando pacotes oficiais do Slackware 15.0.'
     sync_root_metadata "$source" "$SLACKWARE_REPO"
     mkdir -p "$SLACKWARE_REPO/slackware64" "$SLACKWARE_REPO/patches/packages" \
-        "$SLACKWARE_REPO/extra" "$SLACKWARE_REPO/deps"
+        "$SLACKWARE_REPO/extra"
     rsync_common "$source/slackware64/" "$SLACKWARE_REPO/slackware64/"
     rsync_common "$source/patches/packages/" "$SLACKWARE_REPO/patches/packages/"
     rsync_common --exclude='source/' --exclude='*/source/' \
         "$source/extra/" "$SLACKWARE_REPO/extra/"
-    rsync_common "$source/deps/" "$SLACKWARE_REPO/deps/"
 }
 
 sync_salix_repository()

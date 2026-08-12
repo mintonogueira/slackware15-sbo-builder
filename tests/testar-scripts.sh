@@ -208,6 +208,11 @@ grep -q -- '--inet4-only --timeout=30 --tries=3' \
     "$PROJECT_DIR/slackbuilds/google-chrome/google-chrome.SlackBuild"
 grep -q 'a verificacao dos navegadores falhou' \
     "$PROJECT_DIR/scripts/gerenciar-repositorios.sh"
+if grep -Eq 'SLACKWARE_REPO/deps|source/deps' \
+    "$PROJECT_DIR/scripts/gerenciar-repositorios.sh"; then
+    printf '%s\n' 'ERRO: a sincronizacao ainda tenta acessar Slackware deps/.' >&2
+    exit 1
+fi
 test -x "$HOST_DATA/rotinas/scripts/gerenciar-repositorios.sh"
 test -x "$HOST_DATA/slackbuilds-personalizados/brave-browser/brave-browser.SlackBuild"
 test -x "$HOST_DATA/slackbuilds-personalizados/google-chrome/google-chrome.SlackBuild"
