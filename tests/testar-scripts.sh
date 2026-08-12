@@ -28,12 +28,46 @@ bash -n "$PROJECT_DIR/slackbuilds/google-chrome/google-chrome.SlackBuild"
 sh -n "$PROJECT_DIR/slackbuilds/brave-browser/doinst.sh"
 sh -n "$PROJECT_DIR/slackbuilds/google-chrome/doinst.sh"
 
+# O controlador operacional deve recusar Podman rootful antes de criar dados.
+ROOT_FAKEBIN="$TEMP_DIR/root-fakebin"
+ROOT_REJECT_DATA="$TEMP_DIR/root-rejeitado"
+mkdir -p "$ROOT_FAKEBIN"
+cat > "$ROOT_FAKEBIN/id" <<'EOF'
+#!/bin/sh
+case "${1:-}" in
+    -u) printf '%s\n' 0 ;;
+    -g) printf '%s\n' 0 ;;
+    -un) printf '%s\n' root ;;
+    *) exit 1 ;;
+esac
+EOF
+chmod 0755 "$ROOT_FAKEBIN/id"
+set +e
+PATH="$ROOT_FAKEBIN:$PATH" SLACKBUILD_DATA_DIR="$ROOT_REJECT_DATA" \
+    "$PROJECT_DIR/compilar-slackbuilds.sh" --status \
+    >"$TEMP_DIR/root-rejeitado.out" 2>&1
+root_reject_rc=$?
+set -e
+[ "$root_reject_rc" -ne 0 ]
+grep -q 'nao execute este controlador com sudo' \
+    "$TEMP_DIR/root-rejeitado.out"
+[ ! -e "$ROOT_REJECT_DATA" ]
+
 # Versoes diferentes do Podman retornam o ID da imagem com ou sem o prefixo
 # "sha256:". O controlador deve aceitar ambos e persistir o formato normalizado.
 PULL_FAKEBIN="$TEMP_DIR/pull-fakebin"
 PULL_DATA="$TEMP_DIR/pull-dados"
 PULL_HASH='63cc3e66abe3e05f4fffeb66a9ed83548a56c3822ac58c1db448bd87633d018f'
 mkdir -p "$PULL_FAKEBIN"
+cat > "$PULL_FAKEBIN/id" <<'EOF'
+#!/bin/sh
+case "${1:-}" in
+    -u) printf '%s\n' 1000 ;;
+    -g) printf '%s\n' 1000 ;;
+    -un) printf '%s\n' usuario-teste ;;
+    *) exit 1 ;;
+esac
+EOF
 cat > "$PULL_FAKEBIN/podman" <<'EOF'
 #!/bin/sh
 case "$1 ${2:-}" in
@@ -48,7 +82,7 @@ case "$1 ${2:-}" in
     *) printf 'podman falso recebeu: %s\n' "$*" >&2; exit 1 ;;
 esac
 EOF
-chmod 0755 "$PULL_FAKEBIN/podman"
+chmod 0755 "$PULL_FAKEBIN/id" "$PULL_FAKEBIN/podman"
 for PULL_ID in "$PULL_HASH" "sha256:$PULL_HASH"; do
     rm -rf "$PULL_DATA"
     PATH="$PULL_FAKEBIN:$PATH" \
@@ -126,6 +160,15 @@ HOST_FAKEBIN="$TEMP_DIR/host-fakebin"
 HOST_DATA="$TEMP_DIR/host-dados"
 mkdir -p "$HOST_FAKEBIN" "$HOST_DATA/.estado"
 printf '%s\n' 'host' > "$HOST_DATA/.estado/pergunta-vpn-respondida"
+cat > "$HOST_FAKEBIN/id" <<'EOF'
+#!/bin/sh
+case "${1:-}" in
+    -u) printf '%s\n' 1000 ;;
+    -g) printf '%s\n' 1000 ;;
+    -un) printf '%s\n' usuario-teste ;;
+    *) exit 1 ;;
+esac
+EOF
 cat > "$HOST_FAKEBIN/podman" <<'EOF'
 #!/bin/sh
 case "$1 ${2:-}" in
@@ -146,7 +189,7 @@ case "$1 ${2:-}" in
     *) printf 'podman falso recebeu: %s\n' "$*" >&2; exit 1 ;;
 esac
 EOF
-chmod 0755 "$HOST_FAKEBIN/podman"
+chmod 0755 "$HOST_FAKEBIN/id" "$HOST_FAKEBIN/podman"
 READY_COUNT_FILE="$TEMP_DIR/podman-prontidao-contagem"
 FAKE_PODMAN_READY_COUNT="$READY_COUNT_FILE" \
 PATH="$HOST_FAKEBIN:$PATH" SLACKBUILD_DATA_DIR="$HOST_DATA" \
@@ -155,6 +198,14 @@ SLACKBUILD_STARTUP_TIMEOUT=30 \
 [ "$(sed -n '1p' "$READY_COUNT_FILE")" -eq 2 ]
 grep -q 'SLACKBUILD_STARTUP_TIMEOUT:-600' \
     "$PROJECT_DIR/compilar-slackbuilds.sh"
+grep -q -- '--inet4-only --timeout=30 --tries=3' \
+    "$PROJECT_DIR/scripts/atualizar-navegadores.sh"
+grep -q -- '--inet4-only --timeout=30 --tries=3' \
+    "$PROJECT_DIR/slackbuilds/brave-browser/brave-browser.SlackBuild"
+grep -q -- '--inet4-only --timeout=30 --tries=3' \
+    "$PROJECT_DIR/slackbuilds/google-chrome/google-chrome.SlackBuild"
+grep -q 'a verificacao dos navegadores falhou' \
+    "$PROJECT_DIR/scripts/gerenciar-repositorios.sh"
 test -x "$HOST_DATA/rotinas/scripts/gerenciar-repositorios.sh"
 test -x "$HOST_DATA/slackbuilds-personalizados/brave-browser/brave-browser.SlackBuild"
 test -x "$HOST_DATA/slackbuilds-personalizados/google-chrome/google-chrome.SlackBuild"
@@ -166,6 +217,85 @@ test -x "$HOST_DATA/slackbuilds-personalizados/google-chrome/google-chrome.Slack
     cd "$HOST_DATA/slackbuilds-personalizados"
     sha256sum -c SHA256SUMS >/dev/null
 )
+
+# Uma instancia antiga rootful ocupando as portas deve ser migrada sem apagar
+# o volume persistente e a instancia rootless interrompida deve iniciar.
+MIGRATE_FAKEBIN="$TEMP_DIR/migrate-fakebin"
+MIGRATE_DATA="$TEMP_DIR/migrate-dados"
+ROOTFUL_STATE="$TEMP_DIR/rootful-existe"
+ROOTLESS_RUNNING="$TEMP_DIR/rootless-ativo"
+mkdir -p "$MIGRATE_FAKEBIN" "$MIGRATE_DATA/.estado"
+: > "$ROOTFUL_STATE"
+printf '%s\n' host > "$MIGRATE_DATA/.estado/pergunta-vpn-respondida"
+cat > "$MIGRATE_FAKEBIN/id" <<'EOF'
+#!/bin/sh
+case "${1:-}" in
+    -u) printf '%s\n' 1000 ;;
+    -g) printf '%s\n' 1000 ;;
+    -un) printf '%s\n' usuario-teste ;;
+    *) exit 1 ;;
+esac
+EOF
+cat > "$MIGRATE_FAKEBIN/ss" <<'EOF'
+#!/bin/sh
+printf '%s\n' 'State Recv-Q Send-Q Local Address:Port Peer Address:Port'
+if [ -e "$FAKE_ROOTFUL_STATE" ]; then
+    printf '%s\n' 'LISTEN 0 128 0.0.0.0:8080 0.0.0.0:*'
+    printf '%s\n' 'LISTEN 0 128 [::]:8443 [::]:*'
+fi
+EOF
+cat > "$MIGRATE_FAKEBIN/sudo" <<'EOF'
+#!/bin/sh
+case "${1:-}" in
+    podman)
+        shift
+        FAKE_PODMAN_ROOTFUL=1 exec podman "$@"
+        ;;
+    chown) exit 0 ;;
+    *) exit 1 ;;
+esac
+EOF
+cat > "$MIGRATE_FAKEBIN/podman" <<'EOF'
+#!/bin/sh
+if [ "${FAKE_PODMAN_ROOTFUL:-0}" = 1 ]; then
+    case "$1 ${2:-}" in
+        'container exists') [ -e "$FAKE_ROOTFUL_STATE" ]; exit ;;
+        'rm --force') rm -f "$FAKE_ROOTFUL_STATE"; exit 0 ;;
+        *) exit 1 ;;
+    esac
+fi
+case "$1 ${2:-}" in
+    'info ') exit 0 ;;
+    'image exists') exit 0 ;;
+    'container exists') exit 0 ;;
+    'inspect -f')
+        if [ -e "$FAKE_ROOTLESS_RUNNING" ]; then
+            printf '%s\n' true
+        else
+            printf '%s\n' false
+        fi
+        exit 0
+        ;;
+    'start slackware15-repositorio')
+        : > "$FAKE_ROOTLESS_RUNNING"
+        exit 0
+        ;;
+    'exec slackware15-repositorio') exit 0 ;;
+    *) printf 'podman falso recebeu: %s\n' "$*" >&2; exit 1 ;;
+esac
+EOF
+chmod 0755 "$MIGRATE_FAKEBIN/id" "$MIGRATE_FAKEBIN/ss" \
+    "$MIGRATE_FAKEBIN/sudo" "$MIGRATE_FAKEBIN/podman"
+printf '\n' | \
+FAKE_ROOTFUL_STATE="$ROOTFUL_STATE" \
+FAKE_ROOTLESS_RUNNING="$ROOTLESS_RUNNING" \
+PATH="$MIGRATE_FAKEBIN:$PATH" SLACKBUILD_DATA_DIR="$MIGRATE_DATA" \
+SLACKBUILD_STARTUP_TIMEOUT=30 \
+    "$PROJECT_DIR/compilar-slackbuilds.sh" --iniciar >/dev/null
+[ ! -e "$ROOTFUL_STATE" ]
+[ -e "$ROOTLESS_RUNNING" ]
+test -s "$MIGRATE_DATA/rotinas/SHA256SUMS"
+test -s "$MIGRATE_DATA/slackbuilds-personalizados/SHA256SUMS"
 
 if grep -Eq '^COPY (scripts/(entrypoint-servico|gerenciar-repositorios|gerar-indice-repositorio|atualizar-navegadores|verificar-navegadores-diariamente)|slackbuilds/)' \
     "$PROJECT_DIR/Containerfile"; then

@@ -91,6 +91,89 @@ require_ports()
         die 'o tempo de inicializacao deve ser de pelo menos 30 segundos'
 }
 
+require_rootless_execution()
+{
+    [ "$(id -u)" -ne 0 ] ||
+        die 'nao execute este controlador com sudo; use o usuario comum. Se existir uma instancia antiga criada com sudo, a migracao sera oferecida automaticamente.'
+}
+
+port_in_use()
+{
+    checked_port=$1
+    if command -v ss >/dev/null 2>&1; then
+        ss -ltn 2>/dev/null | awk -v wanted="$checked_port" '
+            NR > 1 {
+                address = $4
+                sub(/^.*:/, "", address)
+                if (address == wanted) found = 1
+            }
+            END { exit(found ? 0 : 1) }
+        '
+        return
+    fi
+    if command -v netstat >/dev/null 2>&1; then
+        netstat -ltn 2>/dev/null | awk -v wanted="$checked_port" '
+            NR > 2 {
+                address = $4
+                sub(/^.*:/, "", address)
+                if (address == wanted) found = 1
+            }
+            END { exit(found ? 0 : 1) }
+        '
+        return
+    fi
+    return 1
+}
+
+conflicting_ports()
+{
+    conflicts=''
+    for checked_port in "$HTTP_PORT" "$HTTPS_PORT"; do
+        if port_in_use "$checked_port"; then
+            conflicts="${conflicts}${conflicts:+ }${checked_port}"
+        fi
+    done
+    printf '%s\n' "$conflicts"
+}
+
+migrate_legacy_rootful_container()
+{
+    command -v sudo >/dev/null 2>&1 || return 1
+    if ! sudo podman container exists "$CONTAINER" 2>/dev/null; then
+        return 1
+    fi
+
+    log "Foi encontrada uma instancia antiga de $CONTAINER criada com sudo."
+    if ! confirm_default_yes 'Migrar automaticamente para Podman rootless e preservar dados/?'; then
+        return 1
+    fi
+
+    sudo podman rm --force "$CONTAINER" >/dev/null ||
+        die 'nao foi possivel remover a instancia rootful antiga'
+    sudo chown -R "$(id -u):$(id -g)" "$DATA_DIR" ||
+        die "nao foi possivel transferir a propriedade de $DATA_DIR"
+    log 'Instancia rootful removida; dados persistentes preservados e propriedade corrigida.'
+}
+
+ensure_publish_ports_available()
+{
+    conflicts=$(conflicting_ports)
+    [ -n "$conflicts" ] || return 0
+
+    log "Porta(s) ocupada(s) no hospedeiro: $conflicts."
+    if migrate_legacy_rootful_container; then
+        attempts=0
+        while [ "$attempts" -lt 10 ]; do
+            conflicts=$(conflicting_ports)
+            [ -n "$conflicts" ] || return 0
+            sleep 1
+            attempts=$((attempts + 1))
+        done
+    fi
+
+    die "a(s) porta(s) $conflicts continua(m) em uso por outro servico"
+}
+
 prepare_host()
 {
     if [ "$(id -u)" -eq 0 ]; then
@@ -318,9 +401,11 @@ start_service()
             fi
         else
             log "Iniciando o conteiner existente $CONTAINER."
+            ensure_publish_ports_available
             podman start "$CONTAINER" >/dev/null
         fi
     else
+        ensure_publish_ports_available
         log "Criando o servico persistente $CONTAINER."
         tls_ips=$(host_ipv4_list | awk 'NF && !seen[$0]++' | paste -sd, -)
         podman run -d \
@@ -649,8 +734,6 @@ update_image()
     fi
 }
 
-mkdir -p "$STATE_DIR"
-
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --preparar-hospedeiro) ACTION='prepare-host'; shift ;;
@@ -679,6 +762,15 @@ while [ "$#" -gt 0 ]; do
 done
 
 case "$ACTION" in
+    prepare-host) ;;
+    '') usage; exit 2 ;;
+    *)
+        require_rootless_execution
+        mkdir -p "$STATE_DIR"
+        ;;
+esac
+
+case "$ACTION" in
     prepare-host) prepare_host ;;
     start) start_service ;;
     sync) run_task --sincronizar ;;
@@ -703,5 +795,4 @@ case "$ACTION" in
     stop) stop_service ;;
     remove) remove_instance ;;
     update-image) update_image ;;
-    '') usage; exit 2 ;;
 esac

@@ -95,8 +95,12 @@ download()
     local partial="${destination}.parcial.$$"
 
     rm -f "$partial"
-    wget --https-only --timeout=90 --tries=3 --no-verbose \
-        -O "$partial" "$url"
+    if ! wget --https-only --inet4-only --timeout=30 --tries=3 \
+        --waitretry=5 --no-verbose -O "$partial" "$url"; then
+        rm -f "$partial"
+        log "Falha de rede ao acessar $url depois de tres tentativas IPv4."
+        return 1
+    fi
     mv "$partial" "$destination"
 }
 

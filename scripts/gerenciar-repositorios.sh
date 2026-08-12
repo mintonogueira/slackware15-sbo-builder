@@ -959,7 +959,10 @@ case "${1:-}" in
         ;;
     --executar-tudo)
         acquire_operation_lock
-        /usr/local/bin/atualizar-navegadores --todos
+        if ! /usr/local/bin/atualizar-navegadores --todos; then
+            log 'AVISO: a verificacao dos navegadores falhou; os pacotes existentes foram preservados.'
+            log 'A sincronizacao Slackware/Salix e a compilacao SBo continuarao normalmente.'
+        fi
         sync_all
         compile_missing
         ;;

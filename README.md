@@ -62,6 +62,11 @@ chmod +x \
 ./compilar-slackbuilds.sh --executar-tudo
 ```
 
+Execute os comandos operacionais sempre como usuário comum, sem `sudo`. O
+controlador usa Podman rootless e recusa a execução como root para impedir a
+criação de duas instâncias independentes. Somente a preparação do hospedeiro
+pode solicitar `sudo` internamente.
+
 Ao executar `--iniciar`, o controlador baixa a imagem pronta. Se o Podman não
 estiver presente, ele oferece a instalação automática de Podman,
 `fuse-overlayfs`, suporte rootless e das dependências pertinentes:
@@ -82,6 +87,12 @@ Também são tratados:
 
 O comando `--preparar-hospedeiro` continua disponível para preparar apenas o
 hospedeiro antes da inicialização.
+
+Se uma versão anterior tiver sido iniciada com `sudo` e estiver ocupando as
+portas 8080/8443, a próxima execução sem `sudo` identifica o contêiner rootful,
+oferece a migração automática, remove somente essa instância antiga, corrige a
+propriedade de `dados/` e inicia o serviço rootless. Repositórios, caches,
+rotinas, SlackBuilds, pacotes e relatórios persistentes não são apagados.
 
 ## Rotinas e SlackBuilds fora da imagem
 
@@ -200,7 +211,10 @@ O comando:
 10. gera `PACKAGES.TXT`, checksums e relatório final.
 
 Antes dessa sequência, `--executar-tudo` também verifica as versões oficiais
-dos dois navegadores e atualiza o repositório `navegadores/15.0`.
+dos dois navegadores e atualiza o repositório `navegadores/15.0`. Se um
+fornecedor estiver temporariamente inacessível, a falha é registrada, os
+pacotes locais existentes são preservados e a sincronização Slackware/Salix e
+a compilação SBo continuam normalmente.
 
 ## Brave Stable e Google Chrome Stable
 
@@ -225,6 +239,11 @@ arquivo repetidamente, o fluxo diário:
 7. instala ou atualiza o navegador dentro do contêiner persistente;
 8. regenera `PACKAGES.TXT`, `CHECKSUMS.md5` e `CHECKSUMS.sha256`;
 9. preserva somente as três versões mais recentes de cada navegador.
+
+As consultas e os downloads dos navegadores usam IPv4 explicitamente. Isso
+evita tentativas IPv6 sem rota em redes rootless do Podman. Cada arquivo tem
+três tentativas de até 30 segundos, com descarte seguro do download parcial em
+caso de falha.
 
 Na primeira execução existirá somente a versão atual. As três versões serão
 acumuladas naturalmente conforme os fornecedores publicarem atualizações.
@@ -322,6 +341,10 @@ Portas padrão do hospedeiro:
 
 - HTTP: `8080`;
 - HTTPS: `8443`.
+
+Antes de criar ou iniciar o contêiner, o controlador verifica as duas portas.
+Se estiverem ocupadas por outro serviço que não seja a instância antiga do
+projeto, a execução é interrompida com a lista exata das portas conflitantes.
 
 Exemplo:
 
