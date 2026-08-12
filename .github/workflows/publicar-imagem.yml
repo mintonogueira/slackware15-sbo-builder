@@ -27,7 +27,7 @@ jobs:
 
     steps:
       - name: Baixar o repositório
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Preparar certificado de inicialização
         run: |
