@@ -35,7 +35,7 @@ jobs:
           cp /etc/ssl/certs/ca-certificates.crt build/bootstrap-ca.crt
 
       - name: Validar scripts e índice local
-        run: bash tests/testar-scripts.sh
+        run: sudo bash tests/testar-scripts.sh
 
       - name: Autenticar no GHCR
         env:
