@@ -96,16 +96,46 @@ jobs:
             --publish 18080:80 \
             --volume "$PWD/build/test-output:/work:rw" \
             "ghcr.io/${{ github.repository }}:15.0"
-          for attempt in $(seq 1 30); do
-            if curl --fail --silent http://127.0.0.1:18080/ >/dev/null; then
+
+          cleanup_test_container() {
+            status=$?
+            if [ "$status" -ne 0 ]; then
+              printf '%s\n' 'Falha ao validar o serviço. Estado e logs do contêiner:'
+              docker inspect --format \
+                'estado={{.State.Status}} codigo={{.State.ExitCode}} erro={{.State.Error}}' \
+                slackware-repo-test 2>/dev/null || true
+              docker logs slackware-repo-test 2>&1 || true
+            fi
+            docker rm --force slackware-repo-test >/dev/null 2>&1 || true
+            exit "$status"
+          }
+          trap cleanup_test_container EXIT
+
+          servico_pronto=0
+          for attempt in $(seq 1 300); do
+            if [ "$(docker inspect --format '{{.State.Running}}' \
+                slackware-repo-test 2>/dev/null)" != true ]; then
+              printf '%s\n' 'O contêiner encerrou durante a inicialização.' >&2
+              exit 1
+            fi
+            if curl --fail --silent --show-error \
+                --connect-timeout 2 --max-time 5 \
+                http://127.0.0.1:18080/ >/dev/null 2>&1; then
+              servico_pronto=1
               break
             fi
-            sleep 1
+            sleep 2
           done
-          curl --fail http://127.0.0.1:18080/ >/dev/null
+          if [ "$servico_pronto" -ne 1 ]; then
+            printf '%s\n' \
+              'O Apache não ficou disponível após dez minutos.' >&2
+            exit 1
+          fi
+
           docker exec slackware-repo-test \
             /usr/local/bin/gerenciar-repositorios --self-test
-          docker rm --force slackware-repo-test
+          trap - EXIT
+          docker rm --force slackware-repo-test >/dev/null
 
       - name: Publicar no GHCR
         run: |
